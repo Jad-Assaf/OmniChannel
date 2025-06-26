@@ -1,26 +1,15 @@
-/* app/routes/webhooks.meta.ts */
 import {
     type LoaderFunction,
     type ActionFunction,
     json,
 } from "@remix-run/node";
-import { EventEmitter } from "events";        // NEW
 import { db } from "~/utils/db.server";
 
 const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN!;
 
-/* ───── global event-bus (shared per warm Lambda) ───── */
-function bus() {
-    if (!(global as any).__msgBus) {
-        (global as any).__msgBus = new EventEmitter();
-        (global as any).__msgBus.setMaxListeners(0);
-    }
-    return (global as any).__msgBus as EventEmitter;
-}
-
-/* ─────────────────────────────────────────────────────── */
-/* 1. GET  /webhooks/meta → verification handshake         */
-/* ─────────────────────────────────────────────────────── */
+/* ──────────────────────────────────────────────────────────── */
+/* 1. GET  /webhooks/meta  → verification handshake            */
+/* ──────────────────────────────────────────────────────────── */
 export const loader: LoaderFunction = async ({ request }) => {
     const url = new URL(request.url);
     if (
@@ -34,25 +23,26 @@ export const loader: LoaderFunction = async ({ request }) => {
     return new Response("Forbidden", { status: 403 });
 };
 
-/* ─────────────────────────────────────────────────────── */
-/* 2. POST /webhooks/meta → WA + FB messages               */
-/* ─────────────────────────────────────────────────────── */
+/* ──────────────────────────────────────────────────────────── */
+/* 2. POST /webhooks/meta  → WhatsApp + Messenger messages     */
+/* ──────────────────────────────────────────────────────────── */
 export const action: ActionFunction = async ({ request }) => {
     const payload = await request.json();
 
     for (const entry of payload.entry ?? []) {
         switch (payload.object) {
-            /* ─────────── WhatsApp ─────────── */
+            /* ──────────── WhatsApp ──────────── */
             case "whatsapp_business_account": {
                 for (const change of entry.changes ?? []) {
                     const { messages = [], metadata } = change.value ?? {};
                     const phoneNumberId = metadata?.phone_number_id;
 
                     for (const msg of messages) {
-                        const externalId = msg.from;
+                        const externalId = msg.from;                // customer phone
                         const text = msg.text?.body ?? "";
                         const ts = new Date(Number(msg.timestamp) * 1000);
 
+                        // upsert conversation (one per customer phone)
                         const convo = await db.conversation.upsert({
                             where: { externalId_channel: { externalId, channel: "WA" } },
                             update: { updatedAt: ts },
@@ -65,6 +55,7 @@ export const action: ActionFunction = async ({ request }) => {
                             },
                         });
 
+                        // insert inbound message
                         await db.message.create({
                             data: {
                                 conversationId: convo.id,
@@ -73,15 +64,12 @@ export const action: ActionFunction = async ({ request }) => {
                                 timestamp: ts,
                             },
                         });
-
-                        /* PUSH event for SSE listeners */
-                        bus().emit("new", { conversationId: convo.id });   // ← NEW
                     }
                 }
                 break;
             }
 
-            /* ─────────── Facebook Messenger ─────────── */
+            /* ──────────── Facebook Messenger ──────────── */
             case "page": {
                 for (const e of entry.messaging ?? []) {
                     const externalId = e.sender?.id;
@@ -94,7 +82,7 @@ export const action: ActionFunction = async ({ request }) => {
                         create: {
                             channel: "FB",
                             externalId,
-                            sourceId: entry.id, // Page ID
+                            sourceId: entry.id,      // Page ID
                             customerName: null,
                             updatedAt: ts,
                         },
@@ -108,15 +96,13 @@ export const action: ActionFunction = async ({ request }) => {
                             timestamp: ts,
                         },
                     });
-
-                    /* PUSH event for SSE listeners */
-                    bus().emit("new", { conversationId: convo.id });   // ← NEW
                 }
                 break;
             }
         }
     }
 
+    /* Meta needs a quick 200 JSON response */
     return json({ received: true });
 };
   
