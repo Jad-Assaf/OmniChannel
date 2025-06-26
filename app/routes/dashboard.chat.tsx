@@ -1,20 +1,32 @@
 /* app/routes/dashboard.chat.tsx */
+
 import {
     json,
+    eventStream,                     // NEW
     type LoaderFunctionArgs,
     type ActionFunctionArgs,
-    redirect,
 } from "@remix-run/node";
 import {
     useLoaderData,
     Link,
     useFetcher,
     useRevalidator,
+    useEventSource,                  // NEW
 } from "@remix-run/react";
 import { useEffect, useRef } from "react";
+import { EventEmitter } from "events";          // NEW
 import { db } from "~/utils/db.server";
 import { sendMessage } from "~/utils/meta.server";
-import "../styles/chat.css";                       // KEEP STYLES
+import "../styles/chat.css";
+
+/* ═════════════ In-memory event bus (shared per Lambda) ═════════════ */
+function bus() {
+    if (!(global as any).__msgBus) {
+        (global as any).__msgBus = new EventEmitter();
+        (global as any).__msgBus.setMaxListeners(0);
+    }
+    return (global as any).__msgBus as EventEmitter;
+}
 
 /* ─── helpers ──────────────────────────────── */
 const normalizePhone = (raw: string) => {
@@ -29,6 +41,18 @@ const normalizePhone = (raw: string) => {
 export async function loader({ request }: LoaderFunctionArgs) {
     const url = new URL(request.url);
     const selectedId = url.searchParams.get("id") ?? undefined;
+
+    /* SSE endpoint: /dashboard/chat?events=<conversationId> */
+    if (url.searchParams.has("events")) {
+        const convo = url.searchParams.get("events")!;
+        return eventStream(request, (send) => {
+            const handler = (p: { conversationId: string }) => {
+                if (p.conversationId === convo) send("update", Date.now().toString());
+            };
+            bus().on("new", handler);
+            return () => bus().off("new", handler);
+        });
+    }
 
     const conversations = await db.conversation.findMany({
         orderBy: { updatedAt: "desc" },
@@ -74,11 +98,13 @@ export async function action({ request }: ActionFunctionArgs) {
         await db.message.create({
             data: { conversationId, direction: "out", text, timestamp: new Date() },
         });
-
         await db.conversation.update({
             where: { id: conversationId },
             data: { updatedAt: new Date() },
         });
+
+        /* push event so UI of other agents updates instantly */
+        bus().emit("new", { conversationId });
 
         return json({ ok: true, conversationId });
     }
@@ -92,10 +118,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
     if (!convo) {
         const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID_MAIN!;
-
-        // OPTIONAL FIRST TEMPLATE.  Commented out as requested.
-        // await sendWaTemplate(phoneNumberId, phone);
-
+        // await sendWaTemplate(phoneNumberId, phone); // still optional
         convo = await db.conversation.create({
             data: {
                 channel: "WA",
@@ -110,27 +133,9 @@ export async function action({ request }: ActionFunctionArgs) {
     return json({ ok: true, conversationId: convo.id });
 }
 
-/* keep the helper but unused for now */
-async function sendWaTemplate(phoneNumberId: string, to: string) {
-    await fetch(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, {
-        method: "POST",
-        headers: {
-            Authorization: `Bearer ${process.env.WHATSAPP_TOKEN!}`,
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-            messaging_product: "whatsapp",
-            to,
-            type: "template",
-            template: { name: "hello_world", language: { code: "en_US" } },
-        }),
-    });
-}
-
 /* ─── component ───────────────────────────── */
 export default function ChatRoute() {
-    const { conversations, messages, selectedId } =
-        useLoaderData<typeof loader>();
+    const { conversations, messages, selectedId } = useLoaderData<typeof loader>();
 
     const sendFetcher = useFetcher();
     const newChatFetcher = useFetcher<{ conversationId?: string }>();
@@ -138,15 +143,20 @@ export default function ChatRoute() {
     const paneRef = useRef<HTMLDivElement | null>(null);
     const revalidator = useRevalidator();
 
-    /* clear box on submit */
-    /* clear box on submit */
+    /* SSE subscription */
+    const tick = useEventSource(
+        selectedId ? `/dashboard/chat?events=${selectedId}` : null
+    );
     useEffect(() => {
-        if (sendFetcher.state === "submitting" && inputRef.current) {
-            inputRef.current.value = "";      // ← safe: current is not null here
-        }
+        if (tick) revalidator.revalidate();
+    }, [tick, revalidator]);
+
+    /* clear input */
+    useEffect(() => {
+        if (sendFetcher.state === "submitting" && inputRef.current) inputRef.current.value = "";
     }, [sendFetcher.state]);
 
-    /* optimistic bubble */
+    /* optimistic bubble text */
     const optimisticText =
         sendFetcher.state === "submitting"
             ? sendFetcher.formData?.get("text")?.toString() ?? ""
@@ -157,7 +167,7 @@ export default function ChatRoute() {
         paneRef.current?.scrollTo({ top: paneRef.current.scrollHeight });
     }, [messages.length, optimisticText]);
 
-    /* jump to new chat */
+    /* after new chat created */
     useEffect(() => {
         if (
             newChatFetcher.state === "idle" &&
@@ -170,6 +180,9 @@ export default function ChatRoute() {
 
     return (
         <div className="chat-grid">
+            {/* sidebar + UI identical to previous version … */}
+            {/* (code omitted for brevity: keep your existing sidebar & msg pane JSX) */}
+            {/* just ensure JSX below remains unchanged */}
             <aside className="sidebar">
                 <newChatFetcher.Form method="post" className="new-chat-bar">
                     <input name="phone" placeholder="70123456 or +4479…" required />
@@ -224,3 +237,8 @@ export default function ChatRoute() {
         </div>
     );
 }
+
+/* ────────────────────────────────────────────────────────────── */
+/* ONE-LINE addition in your webhook route (after db.message.create) */
+/* bus().emit("new", { conversationId }); */
+  
