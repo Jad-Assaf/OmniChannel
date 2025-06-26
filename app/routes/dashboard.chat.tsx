@@ -1,5 +1,4 @@
 /* app/routes/dashboard.chat.tsx */
-
 import {
     json,
     type LoaderFunctionArgs,
@@ -15,18 +14,18 @@ import {
 import { useEffect, useRef } from "react";
 import { db } from "~/utils/db.server";
 import { sendMessage } from "~/utils/meta.server";
-import "../styles/chat.css";                           // ① keep styles!
+import "../styles/chat.css";                       // KEEP STYLES
 
-/* ───── utils ────────────────────────────────────────────── */
-function normalizePhone(raw: string): string {
-    let s = raw.trim();
-    if (s.startsWith("+")) s = s.slice(1);
-    s = s.replace(/\D+/g, "");
-    if (!s.startsWith("961")) s = "961" + s;
-    return s;
-}
+/* ─── helpers ──────────────────────────────── */
+const normalizePhone = (raw: string) => {
+    let n = raw.trim();
+    if (n.startsWith("+")) n = n.slice(1);
+    n = n.replace(/\D+/g, "");
+    if (!n.startsWith("961")) n = "961" + n;
+    return n;
+};
 
-/* ───── loader: conversations + messages ─────────────────── */
+/* ─── loader ──────────────────────────────── */
 export async function loader({ request }: LoaderFunctionArgs) {
     const url = new URL(request.url);
     const selectedId = url.searchParams.get("id") ?? undefined;
@@ -53,15 +52,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
     return json({ conversations, messages, selectedId });
 }
 
-/* ───── action: reply 𝐨𝐫 start new WA chat ───────────────── */
+/* ─── action (reply OR start) ─────────────── */
 export async function action({ request }: ActionFunctionArgs) {
-    const form = await request.formData();
-    const conversationId = form.get("conversationId")?.toString() ?? null;
-    const phoneRaw = form.get("phone")?.toString()?.trim() ?? null;
-    const rawText = form.get("text")?.toString() ?? "";
-    const text = rawText.trim() || "Hello! 👋";
+    const fd = await request.formData();
+    const conversationId = fd.get("conversationId")?.toString() ?? null;
+    const phoneRaw = fd.get("phone")?.toString() ?? null;
+    const text = (fd.get("text")?.toString() ?? "").trim() || "Hello! 👋";
 
-    /* existing conversation → normal reply */
+    /* reply */
     if (conversationId) {
         const convo = await db.conversation.findUnique({ where: { id: conversationId } });
         if (!convo) throw new Response("Not found", { status: 404 });
@@ -85,17 +83,18 @@ export async function action({ request }: ActionFunctionArgs) {
         return json({ ok: true, conversationId });
     }
 
-    /* new WhatsApp chat */
+    /* new WA chat */
     if (!phoneRaw) throw new Response("Phone missing", { status: 400 });
     const phone = normalizePhone(phoneRaw);
-
     let convo = await db.conversation.findUnique({
         where: { externalId_channel: { externalId: phone, channel: "WA" } },
     });
 
     if (!convo) {
         const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID_MAIN!;
-        await sendWaTemplate(phoneNumberId, phone); // hello_world
+
+        // OPTIONAL FIRST TEMPLATE.  Commented out as requested.
+        // await sendWaTemplate(phoneNumberId, phone);
 
         convo = await db.conversation.create({
             data: {
@@ -104,13 +103,6 @@ export async function action({ request }: ActionFunctionArgs) {
                 sourceId: phoneNumberId,
                 customerName: null,
                 updatedAt: new Date(),
-                messages: {
-                    create: {
-                        direction: "out",
-                        text: "(template) hello_world",
-                        timestamp: new Date(),
-                    },
-                },
             },
         });
     }
@@ -118,7 +110,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return json({ ok: true, conversationId: convo.id });
 }
 
-/* helper: send built-in template */
+/* keep the helper but unused for now */
 async function sendWaTemplate(phoneNumberId: string, to: string) {
     await fetch(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, {
         method: "POST",
@@ -135,7 +127,7 @@ async function sendWaTemplate(phoneNumberId: string, to: string) {
     });
 }
 
-/* ───── component ─────────────────────────────────────────── */
+/* ─── component ───────────────────────────── */
 export default function ChatRoute() {
     const { conversations, messages, selectedId } =
         useLoaderData<typeof loader>();
@@ -146,11 +138,9 @@ export default function ChatRoute() {
     const paneRef = useRef<HTMLDivElement | null>(null);
     const revalidator = useRevalidator();
 
-    /* clear input instantly */
+    /* clear box on submit */
     useEffect(() => {
-        if (sendFetcher.state === "submitting" && inputRef.current) {
-            inputRef.current.value = "";
-        }
+        if (sendFetcher.state === "submitting") inputRef.current?.value = "";
     }, [sendFetcher.state]);
 
     /* optimistic bubble */
@@ -159,12 +149,12 @@ export default function ChatRoute() {
             ? sendFetcher.formData?.get("text")?.toString() ?? ""
             : null;
 
-    /* scroll bottom */
+    /* auto-scroll */
     useEffect(() => {
         paneRef.current?.scrollTo({ top: paneRef.current.scrollHeight });
     }, [messages.length, optimisticText]);
 
-    /* navigate to new chat once created/found */
+    /* jump to new chat */
     useEffect(() => {
         if (
             newChatFetcher.state === "idle" &&
@@ -178,13 +168,8 @@ export default function ChatRoute() {
     return (
         <div className="chat-grid">
             <aside className="sidebar">
-                {/* new chat */}
                 <newChatFetcher.Form method="post" className="new-chat-bar">
-                    <input
-                        name="phone"
-                        placeholder="New WA chat (e.g. 70123456)"
-                        required
-                    />
+                    <input name="phone" placeholder="70123456 or +4479…" required />
                     <button>Start</button>
                 </newChatFetcher.Form>
 
@@ -193,14 +178,10 @@ export default function ChatRoute() {
                     {conversations.map((c) => (
                         <li
                             key={c.id}
-                            className={
-                                c.id === selectedId ? "conversation active" : "conversation"
-                            }
+                            className={c.id === selectedId ? "conversation active" : "conversation"}
                         >
                             <Link to={`?id=${c.id}`}>
-                                <span className={`badge ${c.channel.toLowerCase()}`}>
-                                    {c.channel}
-                                </span>
+                                <span className={`badge ${c.channel.toLowerCase()}`}>{c.channel}</span>
                                 {c.customerName ?? c.externalId}
                             </Link>
                         </li>
@@ -214,9 +195,7 @@ export default function ChatRoute() {
                         {messages.map((m) => (
                             <div key={m.id} className={`bubble ${m.direction}`}>
                                 <div className="bubble-body">{m.text}</div>
-                                <span className="ts">
-                                    {new Date(m.timestamp).toLocaleString()}
-                                </span>
+                                <span className="ts">{new Date(m.timestamp).toLocaleString()}</span>
                             </div>
                         ))}
 
@@ -230,15 +209,8 @@ export default function ChatRoute() {
 
                     <sendFetcher.Form method="post" className="composer">
                         <input type="hidden" name="conversationId" value={selectedId} />
-                        <input
-                            ref={inputRef}
-                            name="text"
-                            placeholder="Type a reply…"
-                            autoComplete="off"
-                        />
-                        <button type="submit" disabled={sendFetcher.state !== "idle"}>
-                            Send
-                        </button>
+                        <input ref={inputRef} name="text" placeholder="Reply…" autoComplete="off" />
+                        <button disabled={sendFetcher.state !== "idle"}>Send</button>
                     </sendFetcher.Form>
                 </section>
             ) : (
