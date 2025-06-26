@@ -72,6 +72,8 @@
     flex: 1;
     overflow-y: auto;
     padding: 16px;
+    display: flex;
+    flex-direction: column;
 }
 
 .bubble {
@@ -95,6 +97,7 @@
 
 .bubble-body {
     white-space: pre-wrap;
+    color: #000;
 }
 
 .ts {
