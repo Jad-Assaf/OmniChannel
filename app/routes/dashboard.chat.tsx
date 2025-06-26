@@ -13,6 +13,7 @@ import {
 import { db } from "~/utils/db.server";
 import { sendMessage } from "~/utils/meta.server";
 import { useEffect, useRef } from "react";
+import "../styles/chat.css"
 
 /* ───── loader: conversations + messages ───── */
 export async function loader({ request }: LoaderFunctionArgs) {
