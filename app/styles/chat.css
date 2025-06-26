@@ -143,3 +143,25 @@
     justify-content: center;
     color: #888;
 }
+
+.new-chat-bar {
+    display: flex;
+    border-bottom: 1px solid #d0d0d0;
+}
+
+.new-chat-bar input {
+    flex: 1;
+    border: none;
+    padding: 8px 10px;
+    font-size: 14px;
+    outline: none;
+}
+
+.new-chat-bar button {
+    border: none;
+    background: #25d366;
+    color: #fff;
+    padding: 0 14px;
+    cursor: pointer;
+    font-weight: 600;
+}
