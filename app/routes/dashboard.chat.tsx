@@ -15,9 +15,18 @@ import {
 import { useEffect, useRef } from "react";
 import { db } from "~/utils/db.server";
 import { sendMessage } from "~/utils/meta.server";
-import "../styles/chat.css"; // ① keep styles!
+import "../styles/chat.css";                           // ① keep styles!
 
-/* ─── loader: list + messages ────────────────────────────────────────── */
+/* ───── utils ────────────────────────────────────────────── */
+function normalizePhone(raw: string): string {
+    let s = raw.trim();
+    if (s.startsWith("+")) s = s.slice(1);
+    s = s.replace(/\D+/g, "");
+    if (!s.startsWith("961")) s = "961" + s;
+    return s;
+}
+
+/* ───── loader: conversations + messages ─────────────────── */
 export async function loader({ request }: LoaderFunctionArgs) {
     const url = new URL(request.url);
     const selectedId = url.searchParams.get("id") ?? undefined;
@@ -44,21 +53,19 @@ export async function loader({ request }: LoaderFunctionArgs) {
     return json({ conversations, messages, selectedId });
 }
 
-/* ─── action: reply 𝐨𝐫 start-new chat ──────────────────────────────── */
+/* ───── action: reply 𝐨𝐫 start new WA chat ───────────────── */
 export async function action({ request }: ActionFunctionArgs) {
     const form = await request.formData();
-
     const conversationId = form.get("conversationId")?.toString() ?? null;
-    const phone = form.get("phone")?.toString()?.trim() ?? null;
+    const phoneRaw = form.get("phone")?.toString()?.trim() ?? null;
     const rawText = form.get("text")?.toString() ?? "";
     const text = rawText.trim() || "Hello! 👋";
 
-    /* ── 1. Existing conversation → normal reply ───────────────────── */
+    /* existing conversation → normal reply */
     if (conversationId) {
         const convo = await db.conversation.findUnique({ where: { id: conversationId } });
         if (!convo) throw new Response("Not found", { status: 404 });
 
-        // send via unified helper
         await sendMessage({
             channel: convo.channel as "WA" | "FB",
             to: convo.externalId,
@@ -78,33 +85,40 @@ export async function action({ request }: ActionFunctionArgs) {
         return json({ ok: true, conversationId });
     }
 
-    /* ── 2. New WhatsApp chat (requires phone) ──────────────────────── */
-    if (!phone) throw new Response("Phone missing", { status: 400 });
+    /* new WhatsApp chat */
+    if (!phoneRaw) throw new Response("Phone missing", { status: 400 });
+    const phone = normalizePhone(phoneRaw);
 
-    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID_MAIN!;
-    await sendWaTemplate(phoneNumberId, phone); // hello_world template
+    let convo = await db.conversation.findUnique({
+        where: { externalId_channel: { externalId: phone, channel: "WA" } },
+    });
 
-    const convo = await db.conversation.create({
-        data: {
-            channel: "WA",
-            externalId: phone,
-            sourceId: phoneNumberId,
-            customerName: null,
-            updatedAt: new Date(),
-            messages: {
-                create: {
-                    direction: "out",
-                    text: "(template) hello_world",
-                    timestamp: new Date(),
+    if (!convo) {
+        const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID_MAIN!;
+        await sendWaTemplate(phoneNumberId, phone); // hello_world
+
+        convo = await db.conversation.create({
+            data: {
+                channel: "WA",
+                externalId: phone,
+                sourceId: phoneNumberId,
+                customerName: null,
+                updatedAt: new Date(),
+                messages: {
+                    create: {
+                        direction: "out",
+                        text: "(template) hello_world",
+                        timestamp: new Date(),
+                    },
                 },
             },
-        },
-    });
+        });
+    }
 
     return json({ ok: true, conversationId: convo.id });
 }
 
-/* helper for template send */
+/* helper: send built-in template */
 async function sendWaTemplate(phoneNumberId: string, to: string) {
     await fetch(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, {
         method: "POST",
@@ -121,47 +135,36 @@ async function sendWaTemplate(phoneNumberId: string, to: string) {
     });
 }
 
-/* ─── component ────────────────────────────────────────────────────── */
+/* ───── component ─────────────────────────────────────────── */
 export default function ChatRoute() {
     const { conversations, messages, selectedId } =
         useLoaderData<typeof loader>();
 
-    /* fetchers */
-    /* fetchers */
-    const sendFetcher = useFetcher();                         // replies
-    const newChatFetcher = useFetcher<{ conversationId?: string }>(); // NEW
-
-    /* refs  +  UI helpers */
+    const sendFetcher = useFetcher();
+    const newChatFetcher = useFetcher<{ conversationId?: string }>();
     const inputRef = useRef<HTMLInputElement | null>(null);
     const paneRef = useRef<HTMLDivElement | null>(null);
     const revalidator = useRevalidator();
 
-    /* clear input instantly on reply send */
+    /* clear input instantly */
     useEffect(() => {
         if (sendFetcher.state === "submitting" && inputRef.current) {
             inputRef.current.value = "";
         }
     }, [sendFetcher.state]);
 
-    /* optimistic outbound bubble */
+    /* optimistic bubble */
     const optimisticText =
         sendFetcher.state === "submitting"
             ? sendFetcher.formData?.get("text")?.toString() ?? ""
             : null;
 
-    /* scroll to bottom on new messages */
+    /* scroll bottom */
     useEffect(() => {
         paneRef.current?.scrollTo({ top: paneRef.current.scrollHeight });
     }, [messages.length, optimisticText]);
 
-    /* poll every 3 s for inbound updates */
-    useEffect(() => {
-        if (!selectedId) return;
-        const id = setInterval(() => revalidator.revalidate(), 3000);
-        return () => clearInterval(id);
-    }, [selectedId, revalidator]);
-
-    /* when new chat created, navigate to it */
+    /* navigate to new chat once created/found */
     useEffect(() => {
         if (
             newChatFetcher.state === "idle" &&
@@ -174,13 +177,12 @@ export default function ChatRoute() {
 
     return (
         <div className="chat-grid">
-            {/* ── sidebar ─────────────────────────── */}
             <aside className="sidebar">
-                {/* new-chat bar */}
+                {/* new chat */}
                 <newChatFetcher.Form method="post" className="new-chat-bar">
                     <input
                         name="phone"
-                        placeholder="Start new WA chat (e.g. 96171000000)"
+                        placeholder="New WA chat (e.g. 70123456)"
                         required
                     />
                     <button>Start</button>
@@ -206,7 +208,6 @@ export default function ChatRoute() {
                 </ul>
             </aside>
 
-            {/* ── messages pane ───────────────────── */}
             {selectedId ? (
                 <section className="messages-pane">
                     <div className="messages-scroll" ref={paneRef}>
