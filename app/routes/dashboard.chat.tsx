@@ -7,6 +7,7 @@ import {
 } from "@remix-run/react";
 import { db } from "~/utils/db.server";
 import { sendMessage } from "~/utils/meta.server";
+import "../styles/chat.css"
 
 export async function loader({ request }: LoaderFunctionArgs) {
     const url = new URL(request.url);
