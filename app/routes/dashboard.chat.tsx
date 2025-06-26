@@ -1,91 +1,120 @@
 import {
-    json, ActionFunctionArgs, LoaderFunctionArgs,
-    redirect
+    json,
+    ActionFunctionArgs,
+    LoaderFunctionArgs,
+    redirect,
 } from "@remix-run/node";
 import {
-    useLoaderData, Form, Link, useSearchParams
+    useLoaderData,
+    Link,
+    useSearchParams,
+    useFetcher,
 } from "@remix-run/react";
 import { db } from "~/utils/db.server";
 import { sendMessage } from "~/utils/meta.server";
-import "../styles/chat.css"
+import { useEffect, useRef } from "react";
 
+/* ───── loader: conversations + messages ───── */
 export async function loader({ request }: LoaderFunctionArgs) {
     const url = new URL(request.url);
     const selectedId = url.searchParams.get("id") ?? undefined;
 
     const conversations = await db.conversation.findMany({
         orderBy: { updatedAt: "desc" },
-        take: 30,
+        take: 40,
         select: {
-            id: true, channel: true, customerName: true,
-            externalId: true, updatedAt: true
-        }
+            id: true,
+            channel: true,
+            customerName: true,
+            externalId: true,
+            updatedAt: true,
+        },
     });
 
-    let messages = [];
-    if (selectedId) {
-        messages = await db.message.findMany({
+    const messages = selectedId
+        ? await db.message.findMany({
             where: { conversationId: selectedId },
-            orderBy: { timestamp: "asc" }
-        });
-    }
+            orderBy: { timestamp: "asc" },
+        })
+        : [];
 
     return json({ conversations, messages, selectedId });
 }
 
+/* ───── action: send reply ───── */
 export async function action({ request }: ActionFunctionArgs) {
     const form = await request.formData();
     const conversationId = form.get("conversationId")?.toString()!;
-    const text = form.get("text")?.toString()!.trim();
+    const text = form.get("text")?.toString()?.trim();
 
     if (!text) return redirect(request.url);
 
-    const convo = await db.conversation.findUnique({ where: { id: conversationId } });
+    const convo = await db.conversation.findUnique({
+        where: { id: conversationId },
+    });
     if (!convo) throw new Response("Not found", { status: 404 });
 
-    // 1. hit Meta APIs
     await sendMessage({
         channel: convo.channel as "WA" | "FB",
         to: convo.externalId,
         text,
-        phoneNumberId: convo.sourceId          // WA only
+        phoneNumberId: convo.sourceId,
     });
 
-    // 2. store outgoing message
     await db.message.create({
         data: {
             conversationId,
             direction: "out",
             text,
-            timestamp: new Date()
-        }
+            timestamp: new Date(),
+        },
     });
 
-    // bump conversation timestamp
     await db.conversation.update({
         where: { id: conversationId },
-        data: { updatedAt: new Date() }
+        data: { updatedAt: new Date() },
     });
 
-    return redirect(`?id=${conversationId}`);
+    return json({ ok: true });
 }
-  
+
+/* ───── component ───── */
 export default function ChatRoute() {
-    const { conversations, messages, selectedId } = useLoaderData<typeof loader>();
-    const [params] = useSearchParams();
+    const { conversations, messages, selectedId } =
+        useLoaderData<typeof loader>();
+    const fetcher = useFetcher();
+    const inputRef = useRef<HTMLInputElement | null>(null);
+    const paneRef = useRef<HTMLDivElement | null>(null);
+
+    /* clear input after successful send */
+    useEffect(() => {
+        if (fetcher.state === "idle" && inputRef.current) {
+            inputRef.current.value = "";
+        }
+    }, [fetcher.state]);
+
+    /* auto-scroll to newest message */
+    useEffect(() => {
+        paneRef.current?.scrollTo({ top: paneRef.current.scrollHeight });
+    }, [messages.length]);
 
     return (
         <div className="chat-grid">
-            {/* list */}
+            {/* sidebar */}
             <aside className="sidebar">
-                <h3>Conversations</h3>
-                <ul>
-                    {conversations.map(c => (
-                        <li key={c.id} className={c.id === selectedId ? "active" : ""}>
+                <header className="sidebar-header">Conversations</header>
+                <ul className="conversation-list">
+                    {conversations.map((c) => (
+                        <li
+                            key={c.id}
+                            className={
+                                c.id === selectedId ? "conversation active" : "conversation"
+                            }
+                        >
                             <Link to={`?id=${c.id}`}>
                                 <span className={`badge ${c.channel.toLowerCase()}`}>
                                     {c.channel}
-                                </span>{" "}
+                                </span>
                                 {c.customerName ?? c.externalId}
                             </Link>
                         </li>
@@ -93,30 +122,38 @@ export default function ChatRoute() {
                 </ul>
             </aside>
 
-            {/* pane */}
+            {/* messages */}
             {selectedId ? (
-                <section className="messages">
-                    {messages.map(m => (
-                        <div key={m.id} className={`msg ${m.direction}`}>
-                            <div>{m.text}</div>
-                            <span className="ts">
-                                {new Date(m.timestamp).toLocaleString()}
-                            </span>
-                        </div>
-                    ))}
+                <section className="messages-pane">
+                    <div className="messages-scroll" ref={paneRef}>
+                        {messages.map((m) => (
+                            <div key={m.id} className={`bubble ${m.direction}`}>
+                                <div className="bubble-body">{m.text}</div>
+                                <span className="ts">
+                                    {new Date(m.timestamp).toLocaleString()}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
 
-                    <Form method="post" className="composer">
+                    <fetcher.Form method="post" className="composer">
                         <input type="hidden" name="conversationId" value={selectedId} />
-                        <input name="text" autoComplete="off" placeholder="Type a reply…" />
-                        <button type="submit">Send</button>
-                    </Form>
+                        <input
+                            name="text"
+                            ref={inputRef}
+                            placeholder="Type a reply…"
+                            autoComplete="off"
+                        />
+                        <button type="submit" disabled={fetcher.state === "submitting"}>
+                            Send
+                        </button>
+                    </fetcher.Form>
                 </section>
             ) : (
-                <section className="messages empty-state">
+                <section className="messages-pane empty-state">
                     <p>Select a conversation</p>
                 </section>
             )}
         </div>
     );
 }
-  
