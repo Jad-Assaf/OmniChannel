@@ -1,4 +1,3 @@
-/* app/routes/dashboard.chat.tsx */
 import {
     json,
     type LoaderFunctionArgs,
@@ -12,20 +11,34 @@ import {
 } from "@remix-run/react";
 import { EventEmitter } from "events";
 import { useEffect, useRef } from "react";
+import pkg from "pg";                         // NEW
 import { db } from "~/utils/db.server";
 import { sendMessage } from "~/utils/meta.server";
 import "../styles/chat.css";
 
-/* ─── in-memory bus (shared per warm function) ─── */
-function bus() {
+const { Client } = pkg;
+
+/* ─── global bus fed by Postgres LISTEN ─── */
+function liveBus() {
     if (!(global as any).__bus) {
-        (global as any).__bus = new EventEmitter();
-        (global as any).__bus.setMaxListeners(0);
+        const bus = new EventEmitter();
+        bus.setMaxListeners(0);
+
+        /* one pg listener connection */
+        const listener = new Client({ connectionString: process.env.DATABASE_URL });
+        listener.connect().then(() => {
+            listener.query("LISTEN new_msg");
+            listener.on("notification", (msg) => {
+                bus.emit("new", { conversationId: msg.payload });
+            });
+        });
+
+        (global as any).__bus = bus;
     }
     return (global as any).__bus as EventEmitter;
 }
 
-/* ─── util ─── */
+/* util */
 const normalizePhone = (raw: string) => {
     let n = raw.trim();
     if (n.startsWith("+")) n = n.slice(1);
@@ -34,32 +47,30 @@ const normalizePhone = (raw: string) => {
     return n;
 };
 
-/* ─── loader ─── */
+/* loader */
 export async function loader({ request }: LoaderFunctionArgs) {
     const url = new URL(request.url);
     const selectedId = url.searchParams.get("id") ?? undefined;
 
-    /* Server-Sent Events endpoint */
+    /* SSE */
     if (url.searchParams.has("events")) {
         const convo = url.searchParams.get("events")!;
         const te = new TextEncoder();
 
         const stream = new ReadableStream({
             start(controller) {
-                const send = (data: string) => controller.enqueue(te.encode(`data: ${data}\n\n`));
-
-                const handler = (p: { conversationId: string }) => {
-                    if (p.conversationId === convo) send(Date.now().toString());
+                const send = () => controller.enqueue(te.encode(`data: ping\n\n`));
+                const h = (p: { conversationId: string }) => {
+                    if (p.conversationId === convo) send();
                 };
+                liveBus().on("new", h);
 
-                bus().on("new", handler);
-
-                /* keep-alive ping every 15 s */
-                const ka = setInterval(() => send("💓"), 15_000);
+                /* keep-alive */
+                const ka = setInterval(send, 15000);
 
                 request.signal.addEventListener("abort", () => {
                     clearInterval(ka);
-                    bus().off("new", handler);
+                    liveBus().off("new", h);
                     controller.close();
                 });
             },
@@ -74,37 +85,25 @@ export async function loader({ request }: LoaderFunctionArgs) {
         });
     }
 
-    /* normal load */
+    /* normal load (unchanged) */
     const conversations = await db.conversation.findMany({
         orderBy: { updatedAt: "desc" },
         take: 40,
-        select: {
-            id: true,
-            channel: true,
-            customerName: true,
-            externalId: true,
-            updatedAt: true,
-        },
+        select: { id: true, channel: true, customerName: true, externalId: true, updatedAt: true },
     });
-
     const messages = selectedId
-        ? await db.message.findMany({
-            where: { conversationId: selectedId },
-            orderBy: { timestamp: "asc" },
-        })
+        ? await db.message.findMany({ where: { conversationId: selectedId }, orderBy: { timestamp: "asc" } })
         : [];
-
     return json({ conversations, messages, selectedId });
 }
 
-/* ─── action ─── */
+/* action (identical except the NOTIFY in webhook already pushes) */
 export async function action({ request }: ActionFunctionArgs) {
     const fd = await request.formData();
     const conversationId = fd.get("conversationId")?.toString() ?? null;
     const phoneRaw = fd.get("phone")?.toString() ?? null;
     const text = (fd.get("text")?.toString() ?? "").trim() || "Hello! 👋";
 
-    /* reply */
     if (conversationId) {
         const convo = await db.conversation.findUnique({ where: { id: conversationId } });
         if (!convo) throw new Response("Not found", { status: 404 });
@@ -115,44 +114,29 @@ export async function action({ request }: ActionFunctionArgs) {
             text,
             phoneNumberId: convo.sourceId,
         });
+        await db.message.create({ data: { conversationId, direction: "out", text, timestamp: new Date() } });
+        await db.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
 
-        await db.message.create({
-            data: { conversationId, direction: "out", text, timestamp: new Date() },
-        });
-        await db.conversation.update({
-            where: { id: conversationId },
-            data: { updatedAt: new Date() },
-        });
-
-        bus().emit("new", { conversationId });
         return json({ ok: true, conversationId });
     }
 
-    /* new WA chat */
     if (!phoneRaw) throw new Response("Phone missing", { status: 400 });
     const phone = normalizePhone(phoneRaw);
 
     let convo = await db.conversation.findUnique({
         where: { externalId_channel: { externalId: phone, channel: "WA" } },
     });
-
     if (!convo) {
         const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID_MAIN!;
         convo = await db.conversation.create({
-            data: {
-                channel: "WA",
-                externalId: phone,
-                sourceId: phoneNumberId,
-                customerName: null,
-                updatedAt: new Date(),
-            },
+            data: { channel: "WA", externalId: phone, sourceId: phoneNumberId, customerName: null, updatedAt: new Date() },
         });
     }
 
     return json({ ok: true, conversationId: convo.id });
 }
 
-/* ─── component ─── */
+/* component (unchanged except EventSource) */
 export default function ChatRoute() {
     const { conversations, messages, selectedId } = useLoaderData<typeof loader>();
 
@@ -162,7 +146,7 @@ export default function ChatRoute() {
     const paneRef = useRef<HTMLDivElement | null>(null);
     const revalidator = useRevalidator();
 
-    /* subscribe via EventSource */
+    /* open EventSource */
     useEffect(() => {
         if (!selectedId) return;
         const es = new EventSource(`/dashboard/chat?events=${selectedId}`);
@@ -170,23 +154,19 @@ export default function ChatRoute() {
         return () => es.close();
     }, [selectedId, revalidator]);
 
-    /* optimistic-UI helper */
     const optimisticText =
         sendFetcher.state === "submitting"
             ? sendFetcher.formData?.get("text")?.toString() ?? ""
             : null;
 
-    /* clear input after submit starts */
     useEffect(() => {
         if (sendFetcher.state === "submitting" && inputRef.current) inputRef.current.value = "";
     }, [sendFetcher.state]);
 
-    /* auto-scroll */
     useEffect(() => {
         paneRef.current?.scrollTo({ top: paneRef.current.scrollHeight });
     }, [messages.length, optimisticText]);
 
-    /* nav after new chat created */
     useEffect(() => {
         if (newChatFetcher.state === "idle" && newChatFetcher.data?.conversationId) {
             revalidator.revalidate();
@@ -194,6 +174,7 @@ export default function ChatRoute() {
         }
     }, [newChatFetcher.state, newChatFetcher.data, revalidator]);
 
+    /* ---- JSX identical to previous version (sidebar + messages) ---- */
     return (
         <div className="chat-grid">
             {/* sidebar */}
@@ -206,10 +187,7 @@ export default function ChatRoute() {
                 <header className="sidebar-header">Conversations</header>
                 <ul className="conversation-list">
                     {conversations.map((c) => (
-                        <li
-                            key={c.id}
-                            className={c.id === selectedId ? "conversation active" : "conversation"}
-                        >
+                        <li key={c.id} className={c.id === selectedId ? "conversation active" : "conversation"}>
                             <Link to={`?id=${c.id}`}>
                                 <span className={`badge ${c.channel.toLowerCase()}`}>{c.channel}</span>
                                 {c.customerName ?? c.externalId}
@@ -219,7 +197,6 @@ export default function ChatRoute() {
                 </ul>
             </aside>
 
-            {/* messages */}
             {selectedId ? (
                 <section className="messages-pane">
                     <div className="messages-scroll" ref={paneRef}>
@@ -229,7 +206,6 @@ export default function ChatRoute() {
                                 <span className="ts">{new Date(m.timestamp).toLocaleString()}</span>
                             </div>
                         ))}
-
                         {optimisticText && (
                             <div className="bubble out optimistic">
                                 <div className="bubble-body">{optimisticText}</div>
