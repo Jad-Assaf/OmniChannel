@@ -25,24 +25,18 @@ const normalizePhone = (raw: string) => {
 };
 
 /* ─── loader ─────────────────────────────────────────────── */
-/* ─── loader ─────────────────────────────────────────────── */
 export async function loader({ request }: LoaderFunctionArgs) {
     const url = new URL(request.url);
     const selectedId = url.searchParams.get("id") ?? undefined;
 
-    /* pull the 40 most recently active threads by last message time */
-    const base = await db.conversation.findMany({});
+    /* conversations + unread count */
+    const raw = await db.conversation.findMany({
+        orderBy: { updatedAt: "desc" },
+        take: 40,
+    });
 
     const conversations = await Promise.all(
-        base.map(async (c: { id: any; lastReadAt: any; channel: any; externalId: any; customerName: any; }) => {
-            const lastMsg = await db.message.findFirst({
-                where: { conversationId: c.id },
-                orderBy: { timestamp: "desc" },
-                select: { timestamp: true },
-            });
-
-            const lastMsgAt = lastMsg?.timestamp ?? new Date(0);
-
+        raw.map(async (c: { id: any; lastReadAt: any; channel: any; externalId: any; customerName: any; updatedAt: any; }) => {
             const unread = await db.message.count({
                 where: {
                     conversationId: c.id,
@@ -56,14 +50,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
                 channel: c.channel,
                 externalId: c.externalId,
                 customerName: c.customerName,
-                lastMsgAt,
-                unread,
+                updatedAt: c.updatedAt,
+                unread, // exact number
             };
         })
     );
-
-    /* sort by latest message time, then keep only 40 */
-    conversations.sort((a, b) => b.lastMsgAt.getTime() - a.lastMsgAt.getTime());
 
     const messages = selectedId
         ? await db.message.findMany({
@@ -72,9 +63,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
         })
         : [];
 
-    return json({ conversations: conversations.slice(0, 40), messages, selectedId });
+    return json({ conversations, messages, selectedId });
 }
-  
+
 /* ─── action (unchanged except pg_notify) ────────────────── */
 export async function action({ request }: ActionFunctionArgs) {
     const fd = await request.formData();
