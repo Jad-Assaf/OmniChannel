@@ -3,18 +3,16 @@ import {
     json,
     type LoaderFunctionArgs,
     type ActionFunctionArgs,
-    redirect,
 } from "@remix-run/node";
 import {
     useLoaderData,
     Link,
     useFetcher,
-    useRevalidator,
 } from "@remix-run/react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { db } from "~/utils/db.server";
 import { sendMessage } from "~/utils/meta.server";
-import "../styles/chat.css";                       // KEEP STYLES
+import "../styles/chat.css"; // KEEP STYLES
 
 /* ─── helpers ──────────────────────────────── */
 const normalizePhone = (raw: string) => {
@@ -61,7 +59,9 @@ export async function action({ request }: ActionFunctionArgs) {
 
     /* reply */
     if (conversationId) {
-        const convo = await db.conversation.findUnique({ where: { id: conversationId } });
+        const convo = await db.conversation.findUnique({
+            where: { id: conversationId },
+        });
         if (!convo) throw new Response("Not found", { status: 404 });
 
         await sendMessage({
@@ -93,9 +93,6 @@ export async function action({ request }: ActionFunctionArgs) {
     if (!convo) {
         const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID_MAIN!;
 
-        // OPTIONAL FIRST TEMPLATE.  Commented out as requested.
-        // await sendWaTemplate(phoneNumberId, phone);
-
         convo = await db.conversation.create({
             data: {
                 channel: "WA",
@@ -110,38 +107,23 @@ export async function action({ request }: ActionFunctionArgs) {
     return json({ ok: true, conversationId: convo.id });
 }
 
-/* keep the helper but unused for now */
-async function sendWaTemplate(phoneNumberId: string, to: string) {
-    await fetch(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, {
-        method: "POST",
-        headers: {
-            Authorization: `Bearer ${process.env.WHATSAPP_TOKEN!}`,
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-            messaging_product: "whatsapp",
-            to,
-            type: "template",
-            template: { name: "hello_world", language: { code: "en_US" } },
-        }),
-    });
-}
-
 /* ─── component ───────────────────────────── */
 export default function ChatRoute() {
-    const { conversations, messages, selectedId } =
+    const { conversations, messages: initialMessages, selectedId } =
         useLoaderData<typeof loader>();
+
+    // local state for messages, to append long-poll updates
+    const [messages, setMessages] = useState(initialMessages);
 
     const sendFetcher = useFetcher();
     const newChatFetcher = useFetcher<{ conversationId?: string }>();
     const inputRef = useRef<HTMLInputElement | null>(null);
     const paneRef = useRef<HTMLDivElement | null>(null);
-    const revalidator = useRevalidator();
 
     /* clear box on submit */
     useEffect(() => {
         if (sendFetcher.state === "submitting" && inputRef.current) {
-            inputRef.current.value = "";      // ← safe: current is not null here
+            inputRef.current.value = "";
         }
     }, [sendFetcher.state]);
 
@@ -151,9 +133,11 @@ export default function ChatRoute() {
             ? sendFetcher.formData?.get("text")?.toString() ?? ""
             : null;
 
-    /* auto-scroll */
+    /* auto-scroll on new messages or optimistic bubble */
     useEffect(() => {
-        paneRef.current?.scrollTo({ top: paneRef.current.scrollHeight });
+        paneRef.current?.scrollTo({
+            top: paneRef.current.scrollHeight,
+        });
     }, [messages.length, optimisticText]);
 
     /* jump to new chat */
@@ -162,10 +146,44 @@ export default function ChatRoute() {
             newChatFetcher.state === "idle" &&
             newChatFetcher.data?.conversationId
         ) {
-            revalidator.revalidate();
             window.location.search = `?id=${newChatFetcher.data.conversationId}`;
         }
-    }, [newChatFetcher.state, newChatFetcher.data, revalidator]);
+    }, [newChatFetcher.state, newChatFetcher.data]);
+
+    /* long-poll for new messages */
+    useEffect(() => {
+        let since = initialMessages.length
+            ? initialMessages[initialMessages.length - 1].timestamp
+            : 0;
+        let active = true;
+
+        async function longPoll() {
+            while (active) {
+                const url = new URL("/api/long-poll", window.location.origin);
+                url.searchParams.set("since", String(since));
+                url.searchParams.set("wait", "true");
+
+                try {
+                    const res = await fetch(url.toString());
+                    if (!active) break;
+                    const { messages: newMsgs } = await res.json();
+
+                    if (newMsgs.length) {
+                        setMessages((prev: any) => [...prev, ...newMsgs]);
+                        since = newMsgs[newMsgs.length - 1].timestamp;
+                    }
+                } catch (e) {
+                    console.error("long-poll error", e);
+                    await new Promise((r) => setTimeout(r, 1000));
+                }
+            }
+        }
+
+        longPoll();
+        return () => {
+            active = false;
+        };
+    }, [initialMessages]);
 
     return (
         <div className="chat-grid">
@@ -180,10 +198,14 @@ export default function ChatRoute() {
                     {conversations.map((c) => (
                         <li
                             key={c.id}
-                            className={c.id === selectedId ? "conversation active" : "conversation"}
+                            className={
+                                c.id === selectedId ? "conversation active" : "conversation"
+                            }
                         >
                             <Link to={`?id=${c.id}`}>
-                                <span className={`badge ${c.channel.toLowerCase()}`}>{c.channel}</span>
+                                <span className={`badge ${c.channel.toLowerCase()}`}>
+                                    {c.channel}
+                                </span>
                                 {c.customerName ?? c.externalId}
                             </Link>
                         </li>
@@ -197,12 +219,14 @@ export default function ChatRoute() {
                         {messages.map((m) => (
                             <div key={m.id} className={`bubble ${m.direction}`}>
                                 <div className="bubble-body">{m.text}</div>
-                                <span className="ts">{new Date(m.timestamp).toLocaleString()}</span>
+                                <span className="ts">
+                                    {new Date(m.timestamp).toLocaleString()}
+                                </span>
                             </div>
                         ))}
 
                         {optimisticText && (
-                            <div className="bubble out optimistic">
+                            <div key="optimistic" className="bubble out optimistic">
                                 <div className="bubble-body">{optimisticText}</div>
                                 <span className="ts">{new Date().toLocaleString()}</span>
                             </div>
@@ -210,8 +234,17 @@ export default function ChatRoute() {
                     </div>
 
                     <sendFetcher.Form method="post" className="composer">
-                        <input type="hidden" name="conversationId" value={selectedId} />
-                        <input ref={inputRef} name="text" placeholder="Reply…" autoComplete="off" />
+                        <input
+                            type="hidden"
+                            name="conversationId"
+                            value={selectedId}
+                        />
+                        <input
+                            ref={inputRef}
+                            name="text"
+                            placeholder="Reply…"
+                            autoComplete="off"
+                        />
                         <button disabled={sendFetcher.state !== "idle"}>Send</button>
                     </sendFetcher.Form>
                 </section>
@@ -223,3 +256,4 @@ export default function ChatRoute() {
         </div>
     );
 }
+  

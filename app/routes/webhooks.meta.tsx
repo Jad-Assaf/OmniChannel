@@ -4,6 +4,9 @@ import {
     json,
 } from "@remix-run/node";
 import { db } from "~/utils/db.server";
+import { Pool } from "pg";
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
 
 const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN!;
 
@@ -64,6 +67,16 @@ export const action: ActionFunction = async ({ request }) => {
                                 timestamp: ts,
                             },
                         });
+
+                        await pool.query(
+                            `NOTIFY new_message, $1;`,
+                            [JSON.stringify({
+                                id: msg.id,
+                                text: msg.text,
+                                timestamp: msg.timestamp,
+                                fromMe: false,
+                            })]
+                        );
                     }
                 }
                 break;
@@ -105,4 +118,3 @@ export const action: ActionFunction = async ({ request }) => {
     /* Meta needs a quick 200 JSON response */
     return json({ received: true });
 };
-  
