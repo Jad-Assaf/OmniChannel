@@ -14,7 +14,7 @@ import { db } from "~/utils/db.server";
 import { sendMessage } from "~/utils/meta.server";
 import "../styles/chat.css";
 
-/*  Render Web-Socket listener URL  */
+/* Web-socket listener (Render web-service) */
 const LISTENER_WS = "wss://renderomnilistener.onrender.com";
 
 /* ─── helpers ─────────────────────────────────────────────── */
@@ -60,7 +60,6 @@ export async function action({ request }: ActionFunctionArgs) {
     const phoneRaw = fd.get("phone")?.toString() ?? null;
     const text = (fd.get("text")?.toString() ?? "").trim() || "Hello! 👋";
 
-    /* ── reply to an existing conversation ───────────── */
     if (conversationId) {
         const convo = await db.conversation.findUnique({
             where: { id: conversationId },
@@ -88,7 +87,6 @@ export async function action({ request }: ActionFunctionArgs) {
             data: { updatedAt: saved.timestamp },
         });
 
-        /* push the outgoing message to every open dashboard */
         await db.$executeRaw`SELECT pg_notify(
         'new_message',
         ${JSON.stringify({
@@ -103,7 +101,6 @@ export async function action({ request }: ActionFunctionArgs) {
         return json({ ok: true, conversationId });
     }
 
-    /* ── start a brand-new WhatsApp chat ─────────────── */
     if (!phoneRaw) throw new Response("Phone missing", { status: 400 });
     const phone = normalizePhone(phoneRaw);
 
@@ -129,10 +126,16 @@ export async function action({ request }: ActionFunctionArgs) {
 
 /* ─── React component ─────────────────────────────────────── */
 export default function ChatRoute() {
-    const { conversations, messages: initial, selectedId } =
+    const { conversations, messages: initialMessages, selectedId } =
         useLoaderData<typeof loader>();
 
-    const [messages, setMessages] = useState(initial);
+    /* local state so we can append live WS updates */
+    const [messages, setMessages] = useState(initialMessages);
+
+    /* reset state whenever the user picks a different conversation */
+    useEffect(() => {
+        setMessages(initialMessages);
+    }, [initialMessages, selectedId]);
 
     const sendFetcher = useFetcher();
     const newChatFetcher = useFetcher<{ conversationId?: string }>();
@@ -176,10 +179,10 @@ export default function ChatRoute() {
             try {
                 const msg = JSON.parse(e.data);
                 if (msg.convId === selectedId) {
-                    setMessages((prev) => [...prev, msg]);
+                    setMessages((prev: any) => [...prev, msg]);
                 }
-            } catch (_) {
-                /* ignore parse errors */
+            } catch {
+                /* ignore bad payloads */
             }
         };
 
@@ -235,11 +238,7 @@ export default function ChatRoute() {
                     </div>
 
                     <sendFetcher.Form method="post" className="composer">
-                        <input
-                            type="hidden"
-                            name="conversationId"
-                            value={selectedId}
-                        />
+                        <input type="hidden" name="conversationId" value={selectedId} />
                         <input
                             ref={inputRef}
                             name="text"
