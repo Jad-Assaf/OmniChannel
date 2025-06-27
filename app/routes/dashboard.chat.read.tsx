@@ -1,8 +1,6 @@
 import { json, type ActionFunction } from "@remix-run/node";
 import { db } from "~/utils/db.server";
 
-/* POST /dashboard/chat/read
-   body: conversationId   →  sets lastReadAt = now() */
 export const action: ActionFunction = async ({ request }) => {
     const fd = await request.formData();
     const id = fd.get("conversationId")?.toString();
