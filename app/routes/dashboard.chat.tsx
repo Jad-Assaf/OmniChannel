@@ -11,7 +11,7 @@ import {
     useFetcher,
     useRevalidator,
 } from "@remix-run/react";
-import { useEffect, useRef, useState, Key, ReactElement, JSXElementConstructor, ReactNode, ReactPortal } from "react";
+import { useEffect, useRef } from "react";
 import { db } from "~/utils/db.server";
 import { sendMessage } from "~/utils/meta.server";
 import "../styles/chat.css";                       // KEEP STYLES
@@ -129,51 +129,14 @@ async function sendWaTemplate(phoneNumberId: string, to: string) {
 
 /* ─── component ───────────────────────────── */
 export default function ChatRoute() {
-    const { conversations, messages: initialMessages, selectedId } =
+    const { conversations, messages, selectedId } =
         useLoaderData<typeof loader>();
 
-    const [messages, setMessages] = useState(initialMessages);
     const sendFetcher = useFetcher();
     const newChatFetcher = useFetcher<{ conversationId?: string }>();
     const inputRef = useRef<HTMLInputElement | null>(null);
     const paneRef = useRef<HTMLDivElement | null>(null);
     const revalidator = useRevalidator();
-
-    // Listen for SSE events
-    useEffect(() => {
-        if (!selectedId) return;
-        console.log('[SSE] Connecting to /sse/messages');
-        const es = new EventSource("/sse/messages");
-        es.onopen = () => console.log('[SSE] Connection opened');
-        es.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                console.log('[SSE] Message received:', data);
-                // Only add if for this conversation
-                if (data.conversationId === selectedId) {
-                    setMessages((prev) => {
-                        // Avoid duplicates
-                        if (prev.some((m) => m.id === data.id)) return prev;
-                        const updated = [...prev, data];
-                        console.log('[SSE] Messages state updated:', updated);
-                        return updated;
-                    });
-                }
-            } catch (err) {
-                console.error('[SSE] Error parsing message:', err, event.data);
-            }
-        };
-        es.onerror = (err) => console.error('[SSE] Connection error:', err);
-        return () => {
-            console.log('[SSE] Connection closed');
-            es.close();
-        };
-    }, [selectedId]);
-
-    // Reset messages when selectedId changes
-    useEffect(() => {
-        setMessages(initialMessages);
-    }, [initialMessages, selectedId]);
 
     /* clear box on submit */
     useEffect(() => {
@@ -214,13 +177,13 @@ export default function ChatRoute() {
 
                 <header className="sidebar-header">Conversations</header>
                 <ul className="conversation-list">
-                    {conversations.map((c: { id: Key | null | undefined; channel: string | number | boolean | ReactElement<any, string | JSXElementConstructor<any>> | Iterable<ReactNode> | null | undefined; customerName: any; externalId: any; }) => (
+                    {conversations.map((c) => (
                         <li
                             key={c.id}
                             className={c.id === selectedId ? "conversation active" : "conversation"}
                         >
                             <Link to={`?id=${c.id}`}>
-                                <span className={`badge ${(typeof c.channel === 'string' ? c.channel : '').toLowerCase()}`}>{c.channel}</span>
+                                <span className={`badge ${c.channel.toLowerCase()}`}>{c.channel}</span>
                                 {c.customerName ?? c.externalId}
                             </Link>
                         </li>
@@ -231,7 +194,7 @@ export default function ChatRoute() {
             {selectedId ? (
                 <section className="messages-pane">
                     <div className="messages-scroll" ref={paneRef}>
-                        {messages.map((m: { id: Key | null | undefined; direction: any; text: string | number | boolean | ReactElement<any, string | JSXElementConstructor<any>> | Iterable<ReactNode> | ReactPortal | null | undefined; timestamp: string | number | Date; }) => (
+                        {messages.map((m) => (
                             <div key={m.id} className={`bubble ${m.direction}`}>
                                 <div className="bubble-body">{m.text}</div>
                                 <span className="ts">{new Date(m.timestamp).toLocaleString()}</span>
