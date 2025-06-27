@@ -165,7 +165,7 @@ export default function ChatRoute() {
         if (selectedId) {
             readFetcher.submit(
                 { conversationId: selectedId },
-                { method: "post", action: "/dashboard.chat.read" }
+                { method: "post", action: "/dashboard/chat/read" }   // ← correct URL
             );
         }
     }, [selectedId]);
