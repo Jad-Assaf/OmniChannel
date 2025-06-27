@@ -224,7 +224,6 @@ input:focus-visible {
     animation: fadeIn 0.15s ease-out;
 }
 
-/* chat.css – add anywhere */
 .unread-badge {
     background: #25d366;
     /* WhatsApp green */
