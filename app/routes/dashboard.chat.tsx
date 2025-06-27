@@ -1,3 +1,4 @@
+/* app/routes/dashboard.chat.tsx */
 import {
     json,
     type LoaderFunctionArgs,
@@ -29,8 +30,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const url = new URL(request.url);
     const selectedId = url.searchParams.get("id") ?? undefined;
 
-    /* unread count per conversation */
-    const conversations = await db.$queryRaw<
+    /* exact unread count per conversation */
+    const conversations = await db.$queryRawUnsafe<
         {
             id: string;
             channel: string;
@@ -42,13 +43,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
     >`
       SELECT c.id,
              c.channel,
-             c.externalId,
+             c."externalId",
              c."customerName",
              c."updatedAt",
              COUNT(m.*) FILTER (
                WHERE m.direction = 'in'
                  AND m.timestamp > COALESCE(c."lastReadAt", '1970-01-01')
-             )              AS "unread"
+             ) AS unread
       FROM   "Conversation" c
       LEFT JOIN "Message" m
              ON m."conversationId" = c.id
@@ -74,7 +75,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const phoneRaw = fd.get("phone")?.toString() ?? null;
     const text = (fd.get("text")?.toString() ?? "").trim() || "Hello! 👋";
 
-    /* send reply */
+    /* reply */
     if (conversationId) {
         const convo = await db.conversation.findUnique({ where: { id: conversationId } });
         if (!convo) throw new Response("Not found", { status: 404 });
@@ -117,6 +118,7 @@ export async function action({ request }: ActionFunctionArgs) {
     /* start new WA chat */
     if (!phoneRaw) throw new Response("Phone missing", { status: 400 });
     const phone = normalizePhone(phoneRaw);
+
     let convo = await db.conversation.findUnique({
         where: { externalId_channel: { externalId: phone, channel: "WA" } },
     });
@@ -142,7 +144,7 @@ export default function ChatRoute() {
     const { conversations, messages: initialMessages, selectedId } =
         useLoaderData<typeof loader>();
 
-    /* state */
+    /* local state */
     const [messages, setMessages] = useState(initialMessages);
     useEffect(() => setMessages(initialMessages), [initialMessages, selectedId]);
 
@@ -155,7 +157,7 @@ export default function ChatRoute() {
     const inputRef = useRef<HTMLInputElement | null>(null);
     const paneRef = useRef<HTMLDivElement | null>(null);
 
-    /* mark read */
+    /* mark as read */
     useEffect(() => {
         if (selectedId) {
             readFetcher.submit(
@@ -172,7 +174,7 @@ export default function ChatRoute() {
         }
     }, [sendFetcher.state]);
 
-    /* optimistic bubble */
+    /* optimistic bubble text */
     const optimisticText =
         sendFetcher.state === "submitting"
             ? sendFetcher.formData?.get("text")?.toString() ?? ""
