@@ -1,7 +1,9 @@
+/* app/routes/dashboard.chat.tsx */
 import {
     json,
     type LoaderFunctionArgs,
     type ActionFunctionArgs,
+    redirect,
 } from "@remix-run/node";
 import {
     useLoaderData,
@@ -9,36 +11,12 @@ import {
     useFetcher,
     useRevalidator,
 } from "@remix-run/react";
-import { EventEmitter } from "events";
 import { useEffect, useRef } from "react";
-import pkg from "pg";                         // NEW
 import { db } from "~/utils/db.server";
 import { sendMessage } from "~/utils/meta.server";
-import "../styles/chat.css";
+import "../styles/chat.css";                       // KEEP STYLES
 
-const { Client } = pkg;
-
-/* ─── global bus fed by Postgres LISTEN ─── */
-function liveBus() {
-    if (!(global as any).__bus) {
-        const bus = new EventEmitter();
-        bus.setMaxListeners(0);
-
-        /* one pg listener connection */
-        const listener = new Client({ connectionString: process.env.DATABASE_URL });
-        listener.connect().then(() => {
-            listener.query("LISTEN new_msg");
-            listener.on("notification", (msg) => {
-                bus.emit("new", { conversationId: msg.payload });
-            });
-        });
-
-        (global as any).__bus = bus;
-    }
-    return (global as any).__bus as EventEmitter;
-}
-
-/* util */
+/* ─── helpers ──────────────────────────────── */
 const normalizePhone = (raw: string) => {
     let n = raw.trim();
     if (n.startsWith("+")) n = n.slice(1);
@@ -47,63 +25,41 @@ const normalizePhone = (raw: string) => {
     return n;
 };
 
-/* loader */
+/* ─── loader ──────────────────────────────── */
 export async function loader({ request }: LoaderFunctionArgs) {
     const url = new URL(request.url);
     const selectedId = url.searchParams.get("id") ?? undefined;
 
-    /* SSE */
-    if (url.searchParams.has("events")) {
-        const convo = url.searchParams.get("events")!;
-        const te = new TextEncoder();
-
-        const stream = new ReadableStream({
-            start(controller) {
-                const send = () => controller.enqueue(te.encode(`data: ping\n\n`));
-                const h = (p: { conversationId: string }) => {
-                    if (p.conversationId === convo) send();
-                };
-                liveBus().on("new", h);
-
-                /* keep-alive */
-                const ka = setInterval(send, 15000);
-
-                request.signal.addEventListener("abort", () => {
-                    clearInterval(ka);
-                    liveBus().off("new", h);
-                    controller.close();
-                });
-            },
-        });
-
-        return new Response(stream, {
-            headers: {
-                "Content-Type": "text/event-stream",
-                "Cache-Control": "no-cache",
-                Connection: "keep-alive",
-            },
-        });
-    }
-
-    /* normal load (unchanged) */
     const conversations = await db.conversation.findMany({
         orderBy: { updatedAt: "desc" },
         take: 40,
-        select: { id: true, channel: true, customerName: true, externalId: true, updatedAt: true },
+        select: {
+            id: true,
+            channel: true,
+            customerName: true,
+            externalId: true,
+            updatedAt: true,
+        },
     });
+
     const messages = selectedId
-        ? await db.message.findMany({ where: { conversationId: selectedId }, orderBy: { timestamp: "asc" } })
+        ? await db.message.findMany({
+            where: { conversationId: selectedId },
+            orderBy: { timestamp: "asc" },
+        })
         : [];
+
     return json({ conversations, messages, selectedId });
 }
 
-/* action (identical except the NOTIFY in webhook already pushes) */
+/* ─── action (reply OR start) ─────────────── */
 export async function action({ request }: ActionFunctionArgs) {
     const fd = await request.formData();
     const conversationId = fd.get("conversationId")?.toString() ?? null;
     const phoneRaw = fd.get("phone")?.toString() ?? null;
     const text = (fd.get("text")?.toString() ?? "").trim() || "Hello! 👋";
 
+    /* reply */
     if (conversationId) {
         const convo = await db.conversation.findUnique({ where: { id: conversationId } });
         if (!convo) throw new Response("Not found", { status: 404 });
@@ -114,31 +70,67 @@ export async function action({ request }: ActionFunctionArgs) {
             text,
             phoneNumberId: convo.sourceId,
         });
-        await db.message.create({ data: { conversationId, direction: "out", text, timestamp: new Date() } });
-        await db.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
+
+        await db.message.create({
+            data: { conversationId, direction: "out", text, timestamp: new Date() },
+        });
+
+        await db.conversation.update({
+            where: { id: conversationId },
+            data: { updatedAt: new Date() },
+        });
 
         return json({ ok: true, conversationId });
     }
 
+    /* new WA chat */
     if (!phoneRaw) throw new Response("Phone missing", { status: 400 });
     const phone = normalizePhone(phoneRaw);
-
     let convo = await db.conversation.findUnique({
         where: { externalId_channel: { externalId: phone, channel: "WA" } },
     });
+
     if (!convo) {
         const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID_MAIN!;
+
+        // OPTIONAL FIRST TEMPLATE.  Commented out as requested.
+        // await sendWaTemplate(phoneNumberId, phone);
+
         convo = await db.conversation.create({
-            data: { channel: "WA", externalId: phone, sourceId: phoneNumberId, customerName: null, updatedAt: new Date() },
+            data: {
+                channel: "WA",
+                externalId: phone,
+                sourceId: phoneNumberId,
+                customerName: null,
+                updatedAt: new Date(),
+            },
         });
     }
 
     return json({ ok: true, conversationId: convo.id });
 }
 
-/* component (unchanged except EventSource) */
+/* keep the helper but unused for now */
+async function sendWaTemplate(phoneNumberId: string, to: string) {
+    await fetch(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, {
+        method: "POST",
+        headers: {
+            Authorization: `Bearer ${process.env.WHATSAPP_TOKEN!}`,
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+            messaging_product: "whatsapp",
+            to,
+            type: "template",
+            template: { name: "hello_world", language: { code: "en_US" } },
+        }),
+    });
+}
+
+/* ─── component ───────────────────────────── */
 export default function ChatRoute() {
-    const { conversations, messages, selectedId } = useLoaderData<typeof loader>();
+    const { conversations, messages, selectedId } =
+        useLoaderData<typeof loader>();
 
     const sendFetcher = useFetcher();
     const newChatFetcher = useFetcher<{ conversationId?: string }>();
@@ -146,38 +138,38 @@ export default function ChatRoute() {
     const paneRef = useRef<HTMLDivElement | null>(null);
     const revalidator = useRevalidator();
 
-    /* open EventSource */
+    /* clear box on submit */
+    /* clear box on submit */
     useEffect(() => {
-        if (!selectedId) return;
-        const es = new EventSource(`/dashboard/chat?events=${selectedId}`);
-        es.onmessage = () => revalidator.revalidate();
-        return () => es.close();
-    }, [selectedId, revalidator]);
+        if (sendFetcher.state === "submitting" && inputRef.current) {
+            inputRef.current.value = "";      // ← safe: current is not null here
+        }
+    }, [sendFetcher.state]);
 
+    /* optimistic bubble */
     const optimisticText =
         sendFetcher.state === "submitting"
             ? sendFetcher.formData?.get("text")?.toString() ?? ""
             : null;
 
-    useEffect(() => {
-        if (sendFetcher.state === "submitting" && inputRef.current) inputRef.current.value = "";
-    }, [sendFetcher.state]);
-
+    /* auto-scroll */
     useEffect(() => {
         paneRef.current?.scrollTo({ top: paneRef.current.scrollHeight });
     }, [messages.length, optimisticText]);
 
+    /* jump to new chat */
     useEffect(() => {
-        if (newChatFetcher.state === "idle" && newChatFetcher.data?.conversationId) {
+        if (
+            newChatFetcher.state === "idle" &&
+            newChatFetcher.data?.conversationId
+        ) {
             revalidator.revalidate();
             window.location.search = `?id=${newChatFetcher.data.conversationId}`;
         }
     }, [newChatFetcher.state, newChatFetcher.data, revalidator]);
 
-    /* ---- JSX identical to previous version (sidebar + messages) ---- */
     return (
         <div className="chat-grid">
-            {/* sidebar */}
             <aside className="sidebar">
                 <newChatFetcher.Form method="post" className="new-chat-bar">
                     <input name="phone" placeholder="70123456 or +4479…" required />
@@ -187,7 +179,10 @@ export default function ChatRoute() {
                 <header className="sidebar-header">Conversations</header>
                 <ul className="conversation-list">
                     {conversations.map((c) => (
-                        <li key={c.id} className={c.id === selectedId ? "conversation active" : "conversation"}>
+                        <li
+                            key={c.id}
+                            className={c.id === selectedId ? "conversation active" : "conversation"}
+                        >
                             <Link to={`?id=${c.id}`}>
                                 <span className={`badge ${c.channel.toLowerCase()}`}>{c.channel}</span>
                                 {c.customerName ?? c.externalId}
@@ -206,6 +201,7 @@ export default function ChatRoute() {
                                 <span className="ts">{new Date(m.timestamp).toLocaleString()}</span>
                             </div>
                         ))}
+
                         {optimisticText && (
                             <div className="bubble out optimistic">
                                 <div className="bubble-body">{optimisticText}</div>
@@ -228,4 +224,3 @@ export default function ChatRoute() {
         </div>
     );
 }
-  
