@@ -14,7 +14,7 @@ import { db } from "~/utils/db.server";
 import { sendMessage } from "~/utils/meta.server";
 import "../styles/chat.css";
 
-const LISTENER_WS = "wss://chat-listener.onrender.com"; // ← your Render URL
+const LISTENER_WS = "wss://renderomnilistener.onrender.com"; // ← your Render URL
 
 const normalizePhone = (raw: string) => {
     let n = raw.trim();
