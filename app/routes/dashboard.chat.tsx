@@ -1,4 +1,3 @@
-/* app/routes/dashboard.chat.tsx */
 import {
     json,
     type LoaderFunctionArgs,
@@ -9,15 +8,14 @@ import {
     Link,
     useFetcher,
 } from "@remix-run/react";
-import { useEffect, useRef, useState } from "react";
+import { JSXElementConstructor, Key, ReactElement, ReactNode, ReactPortal, useEffect, useRef, useState } from "react";
 import { db } from "~/utils/db.server";
 import { sendMessage } from "~/utils/meta.server";
 import "../styles/chat.css";
 
-/* Web-socket listener (Render web-service) */
 const LISTENER_WS = "wss://renderomnilistener.onrender.com";
 
-/* ─── helpers ─────────────────────────────────────────────── */
+/* helper */
 const normalizePhone = (raw: string) => {
     let n = raw.trim();
     if (n.startsWith("+")) n = n.slice(1);
@@ -26,23 +24,48 @@ const normalizePhone = (raw: string) => {
     return n;
 };
 
-/* ─── loader ──────────────────────────────────────────────── */
+/* ─── loader ─────────────────────────────────────────────── */
 export async function loader({ request }: LoaderFunctionArgs) {
     const url = new URL(request.url);
     const selectedId = url.searchParams.get("id") ?? undefined;
 
-    const conversations = await db.conversation.findMany({
+    /* conversations + unread flag */
+    const conversationsRaw = await db.conversation.findMany({
         orderBy: { updatedAt: "desc" },
         take: 40,
-        select: {
-            id: true,
-            channel: true,
-            customerName: true,
-            externalId: true,
-            updatedAt: true,
+        include: {         // grab lastReadAt for calc below
+            messages: {
+                orderBy: { timestamp: "desc" },
+                take: 1,
+                select: { direction: true },
+            },
         },
     });
 
+    const conversations = await Promise.all(
+        conversationsRaw.map(async (c: { lastReadAt: Date; id: any; channel: any; externalId: any; customerName: any; updatedAt: any; }) => {
+            const lastReadAt = c.lastReadAt ?? new Date(0);
+            const unread =
+                (await db.message.count({
+                    where: {
+                        conversationId: c.id,
+                        direction: "in",
+                        timestamp: { gt: lastReadAt },
+                    },
+                })) > 0;
+
+            return {
+                id: c.id,
+                channel: c.channel,
+                externalId: c.externalId,
+                customerName: c.customerName,
+                updatedAt: c.updatedAt,
+                unread,
+            };
+        })
+    );
+
+    /* messages for the selected conversation */
     const messages = selectedId
         ? await db.message.findMany({
             where: { conversationId: selectedId },
@@ -53,7 +76,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     return json({ conversations, messages, selectedId });
 }
 
-/* ─── action ──────────────────────────────────────────────── */
+/* ─── action ─────────────────────────────────────────────── */
 export async function action({ request }: ActionFunctionArgs) {
     const fd = await request.formData();
     const conversationId = fd.get("conversationId")?.toString() ?? null;
@@ -61,9 +84,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const text = (fd.get("text")?.toString() ?? "").trim() || "Hello! 👋";
 
     if (conversationId) {
-        const convo = await db.conversation.findUnique({
-            where: { id: conversationId },
-        });
+        const convo = await db.conversation.findUnique({ where: { id: conversationId } });
         if (!convo) throw new Response("Not found", { status: 404 });
 
         await sendMessage({
@@ -101,6 +122,7 @@ export async function action({ request }: ActionFunctionArgs) {
         return json({ ok: true, conversationId });
     }
 
+    /* new WhatsApp chat */
     if (!phoneRaw) throw new Response("Phone missing", { status: 400 });
     const phone = normalizePhone(phoneRaw);
 
@@ -124,43 +146,48 @@ export async function action({ request }: ActionFunctionArgs) {
     return json({ ok: true, conversationId: convo.id });
 }
 
-/* ─── React component ─────────────────────────────────────── */
+/* ─── React component ────────────────────────────────────── */
 export default function ChatRoute() {
     const { conversations, messages: initialMessages, selectedId } =
         useLoaderData<typeof loader>();
 
-    /* local state so we can append live WS updates */
     const [messages, setMessages] = useState(initialMessages);
-
-    /* reset state whenever the user picks a different conversation */
-    useEffect(() => {
-        setMessages(initialMessages);
-    }, [initialMessages, selectedId]);
+    useEffect(() => setMessages(initialMessages), [initialMessages, selectedId]);
 
     const sendFetcher = useFetcher();
     const newChatFetcher = useFetcher<{ conversationId?: string }>();
+    const readFetcher = useFetcher(); // mark conversation read
     const inputRef = useRef<HTMLInputElement | null>(null);
     const paneRef = useRef<HTMLDivElement | null>(null);
 
-    /* clear composer after submit */
+    /* mark current convo read */
+    useEffect(() => {
+        if (selectedId) {
+            readFetcher.submit(
+                { conversationId: selectedId },
+                { method: "post", action: "/dashboard.chat.read" }
+            );
+        }
+    }, [selectedId]);
+
+    /* clear composer */
     useEffect(() => {
         if (sendFetcher.state === "submitting" && inputRef.current) {
             inputRef.current.value = "";
         }
     }, [sendFetcher.state]);
 
-    /* optimistic bubble while request is in flight */
     const optimisticText =
         sendFetcher.state === "submitting"
             ? sendFetcher.formData?.get("text")?.toString() ?? ""
             : null;
 
-    /* scroll to bottom when messages change */
+    /* scroll down */
     useEffect(() => {
         paneRef.current?.scrollTo({ top: paneRef.current.scrollHeight });
     }, [messages.length, optimisticText]);
 
-    /* redirect to a newly created conversation */
+    /* redirect to new chat */
     useEffect(() => {
         if (
             newChatFetcher.state === "idle" &&
@@ -170,7 +197,7 @@ export default function ChatRoute() {
         }
     }, [newChatFetcher.state, newChatFetcher.data]);
 
-    /* WebSocket: stream live NOTIFY events */
+    /* WebSocket */
     useEffect(() => {
         if (!selectedId) return;
         const ws = new WebSocket(LISTENER_WS);
@@ -181,9 +208,7 @@ export default function ChatRoute() {
                 if (msg.convId === selectedId) {
                     setMessages((prev: any) => [...prev, msg]);
                 }
-            } catch {
-                /* ignore bad payloads */
-            }
+            } catch { }
         };
 
         return () => ws.close();
@@ -207,10 +232,9 @@ export default function ChatRoute() {
                             }
                         >
                             <Link to={`?id=${c.id}`}>
-                                <span className={`badge ${c.channel.toLowerCase()}`}>
-                                    {c.channel}
-                                </span>
+                                <span className={`badge ${c.channel.toLowerCase()}`}>{c.channel}</span>
                                 {c.customerName ?? c.externalId}
+                                {c.unread && <span className="dot" />}  {/* red • when unread */}
                             </Link>
                         </li>
                     ))}
@@ -220,7 +244,7 @@ export default function ChatRoute() {
             {selectedId ? (
                 <section className="messages-pane">
                     <div className="messages-scroll" ref={paneRef}>
-                        {messages.map((m) => (
+                        {messages.map((m: { id: Key | null | undefined; direction: any; text: string | number | boolean | ReactElement<any, string | JSXElementConstructor<any>> | Iterable<ReactNode> | ReactPortal | null | undefined; timestamp: string | number | Date; }) => (
                             <div key={m.id} className={`bubble ${m.direction}`}>
                                 <div className="bubble-body">{m.text}</div>
                                 <span className="ts">

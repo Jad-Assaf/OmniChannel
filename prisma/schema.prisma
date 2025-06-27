@@ -8,26 +8,24 @@ generator client {
 }
 
 model Conversation {
-  id           String   @id @default(uuid())
-  channel      String   // "WA" | "FB" | "IG"
-  externalId   String
-  sourceId     String   // phone_number_id or page_id
-  customerName String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  messages     Message[]
+  id            String    @id @default(cuid())
+  channel       String
+  externalId    String
+  sourceId      String?
+  customerName  String?
+  updatedAt     DateTime  @updatedAt
+  lastReadAt    DateTime?            // ← NEW
+  messages      Message[]
 
-  @@index([updatedAt])
-  @@unique([externalId, channel])
+  @@unique([externalId, channel], name: "externalId_channel")
 }
 
 model Message {
-  id             String   @id @default(uuid())
+  id             String    @id @default(cuid())
   conversationId String
-  direction      String   // "in" | "out"
-  text           String?
-  mediaUrl       String?
+  direction      String    // "in" | "out"
+  text           String
   timestamp      DateTime
 
-  Conversation   Conversation @relation(fields: [conversationId], references: [id])
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
 }
