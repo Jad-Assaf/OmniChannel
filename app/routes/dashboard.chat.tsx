@@ -11,7 +11,7 @@ import {
     useFetcher,
     useRevalidator,
 } from "@remix-run/react";
-import { Key, ReactPortal, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, Key, ReactElement, JSXElementConstructor, ReactNode, ReactPortal } from "react";
 import { db } from "~/utils/db.server";
 import { sendMessage } from "~/utils/meta.server";
 import "../styles/chat.css";                       // KEEP STYLES
@@ -142,21 +142,32 @@ export default function ChatRoute() {
     // Listen for SSE events
     useEffect(() => {
         if (!selectedId) return;
+        console.log('[SSE] Connecting to /sse/messages');
         const es = new EventSource("/sse/messages");
+        es.onopen = () => console.log('[SSE] Connection opened');
         es.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
+                console.log('[SSE] Message received:', data);
                 // Only add if for this conversation
                 if (data.conversationId === selectedId) {
-                    setMessages((prev: any[]) => {
+                    setMessages((prev) => {
                         // Avoid duplicates
-                        if (prev.some((m: { id: any; }) => m.id === data.id)) return prev;
-                        return [...prev, data];
+                        if (prev.some((m) => m.id === data.id)) return prev;
+                        const updated = [...prev, data];
+                        console.log('[SSE] Messages state updated:', updated);
+                        return updated;
                     });
                 }
-            } catch {}
+            } catch (err) {
+                console.error('[SSE] Error parsing message:', err, event.data);
+            }
         };
-        return () => es.close();
+        es.onerror = (err) => console.error('[SSE] Connection error:', err);
+        return () => {
+            console.log('[SSE] Connection closed');
+            es.close();
+        };
     }, [selectedId]);
 
     // Reset messages when selectedId changes
@@ -209,7 +220,7 @@ export default function ChatRoute() {
                             className={c.id === selectedId ? "conversation active" : "conversation"}
                         >
                             <Link to={`?id=${c.id}`}>
-                                <span className={`badge ${c.channel.toLowerCase()}`}>{c.channel}</span>
+                                <span className={`badge ${(typeof c.channel === 'string' ? c.channel : '').toLowerCase()}`}>{c.channel}</span>
                                 {c.customerName ?? c.externalId}
                             </Link>
                         </li>

@@ -67,6 +67,14 @@ export const action: ActionFunction = async ({ request }) => {
                         });
 
                         // Broadcast to SSE clients
+                        console.log("[SSE] Broadcasting WA message:", {
+                            id: newMsg.id,
+                            conversationId: convo.id,
+                            direction: "in",
+                            text,
+                            timestamp: ts,
+                            channel: "WA",
+                        });
                         broadcastMessage({
                             id: newMsg.id,
                             conversationId: convo.id,
@@ -109,6 +117,14 @@ export const action: ActionFunction = async ({ request }) => {
                     });
 
                     // Broadcast to SSE clients
+                    console.log("[SSE] Broadcasting FB message:", {
+                        id: newMsg.id,
+                        conversationId: convo.id,
+                        direction: "in",
+                        text,
+                        timestamp: ts,
+                        channel: "FB",
+                    });
                     broadcastMessage({
                         id: newMsg.id,
                         conversationId: convo.id,
