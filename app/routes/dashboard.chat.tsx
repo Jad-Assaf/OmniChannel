@@ -11,7 +11,7 @@ import {
     useFetcher,
     useRevalidator,
 } from "@remix-run/react";
-import { useEffect, useRef } from "react";
+import { Key, ReactPortal, useEffect, useRef, useState } from "react";
 import { db } from "~/utils/db.server";
 import { sendMessage } from "~/utils/meta.server";
 import "../styles/chat.css";                       // KEEP STYLES
@@ -129,16 +129,41 @@ async function sendWaTemplate(phoneNumberId: string, to: string) {
 
 /* ─── component ───────────────────────────── */
 export default function ChatRoute() {
-    const { conversations, messages, selectedId } =
+    const { conversations, messages: initialMessages, selectedId } =
         useLoaderData<typeof loader>();
 
+    const [messages, setMessages] = useState(initialMessages);
     const sendFetcher = useFetcher();
     const newChatFetcher = useFetcher<{ conversationId?: string }>();
     const inputRef = useRef<HTMLInputElement | null>(null);
     const paneRef = useRef<HTMLDivElement | null>(null);
     const revalidator = useRevalidator();
 
-    /* clear box on submit */
+    // Listen for SSE events
+    useEffect(() => {
+        if (!selectedId) return;
+        const es = new EventSource("/sse/messages");
+        es.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                // Only add if for this conversation
+                if (data.conversationId === selectedId) {
+                    setMessages((prev: any[]) => {
+                        // Avoid duplicates
+                        if (prev.some((m: { id: any; }) => m.id === data.id)) return prev;
+                        return [...prev, data];
+                    });
+                }
+            } catch {}
+        };
+        return () => es.close();
+    }, [selectedId]);
+
+    // Reset messages when selectedId changes
+    useEffect(() => {
+        setMessages(initialMessages);
+    }, [initialMessages, selectedId]);
+
     /* clear box on submit */
     useEffect(() => {
         if (sendFetcher.state === "submitting" && inputRef.current) {
@@ -178,7 +203,7 @@ export default function ChatRoute() {
 
                 <header className="sidebar-header">Conversations</header>
                 <ul className="conversation-list">
-                    {conversations.map((c) => (
+                    {conversations.map((c: { id: Key | null | undefined; channel: string | number | boolean | ReactElement<any, string | JSXElementConstructor<any>> | Iterable<ReactNode> | null | undefined; customerName: any; externalId: any; }) => (
                         <li
                             key={c.id}
                             className={c.id === selectedId ? "conversation active" : "conversation"}
@@ -195,7 +220,7 @@ export default function ChatRoute() {
             {selectedId ? (
                 <section className="messages-pane">
                     <div className="messages-scroll" ref={paneRef}>
-                        {messages.map((m) => (
+                        {messages.map((m: { id: Key | null | undefined; direction: any; text: string | number | boolean | ReactElement<any, string | JSXElementConstructor<any>> | Iterable<ReactNode> | ReactPortal | null | undefined; timestamp: string | number | Date; }) => (
                             <div key={m.id} className={`bubble ${m.direction}`}>
                                 <div className="bubble-body">{m.text}</div>
                                 <span className="ts">{new Date(m.timestamp).toLocaleString()}</span>
