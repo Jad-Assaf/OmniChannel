@@ -139,11 +139,13 @@ export default function ChatRoute() {
     const revalidator = useRevalidator();
 
     /* clear box on submit */
+    /* clear box on submit */
     useEffect(() => {
         if (sendFetcher.state === "submitting" && inputRef.current) {
             inputRef.current.value = "";      // ← safe: current is not null here
         }
     }, [sendFetcher.state]);
+  
 
     /* optimistic bubble */
     const optimisticText =
@@ -223,3 +225,4 @@ export default function ChatRoute() {
         </div>
     );
 }
+  
