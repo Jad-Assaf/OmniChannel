@@ -4,6 +4,7 @@ import {
     json,
 } from "@remix-run/node";
 import { db } from "~/utils/db.server";
+import { broadcastMessage } from "./sse.messages";
 
 const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN!;
 
@@ -56,13 +57,23 @@ export const action: ActionFunction = async ({ request }) => {
                         });
 
                         // insert inbound message
-                        await db.message.create({
+                        const newMsg = await db.message.create({
                             data: {
                                 conversationId: convo.id,
                                 direction: "in",
                                 text,
                                 timestamp: ts,
                             },
+                        });
+
+                        // Broadcast to SSE clients
+                        broadcastMessage({
+                            id: newMsg.id,
+                            conversationId: convo.id,
+                            direction: "in",
+                            text,
+                            timestamp: ts,
+                            channel: "WA",
                         });
                     }
                 }
@@ -88,13 +99,23 @@ export const action: ActionFunction = async ({ request }) => {
                         },
                     });
 
-                    await db.message.create({
+                    const newMsg = await db.message.create({
                         data: {
                             conversationId: convo.id,
                             direction: "in",
                             text,
                             timestamp: ts,
                         },
+                    });
+
+                    // Broadcast to SSE clients
+                    broadcastMessage({
+                        id: newMsg.id,
+                        conversationId: convo.id,
+                        direction: "in",
+                        text,
+                        timestamp: ts,
+                        channel: "FB",
                     });
                 }
                 break;
