@@ -64,6 +64,17 @@ export const action: ActionFunction = async ({ request }) => {
                                 timestamp: ts,
                             },
                         });
+
+                        await db.$executeRaw`SELECT pg_notify(
+                            'new_message',
+                            ${JSON.stringify({
+                                id: msg.id,          // <-- external platform ID
+                                convId: convo.id,
+                                direction: "in",
+                                text,
+                                timestamp: ts.getTime(),
+                            })}
+                        )`;
                     }
                 }
                 break;
@@ -105,4 +116,3 @@ export const action: ActionFunction = async ({ request }) => {
     /* Meta needs a quick 200 JSON response */
     return json({ received: true });
 };
-  

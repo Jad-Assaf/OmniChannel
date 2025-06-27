@@ -3,20 +3,19 @@ import {
     json,
     type LoaderFunctionArgs,
     type ActionFunctionArgs,
-    redirect,
 } from "@remix-run/node";
 import {
     useLoaderData,
     Link,
     useFetcher,
-    useRevalidator,
 } from "@remix-run/react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { db } from "~/utils/db.server";
 import { sendMessage } from "~/utils/meta.server";
-import "../styles/chat.css";                       // KEEP STYLES
+import "../styles/chat.css";
 
-/* ─── helpers ──────────────────────────────── */
+const LISTENER_WS = "wss://chat-listener.onrender.com"; // ← your Render URL
+
 const normalizePhone = (raw: string) => {
     let n = raw.trim();
     if (n.startsWith("+")) n = n.slice(1);
@@ -52,14 +51,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
     return json({ conversations, messages, selectedId });
 }
 
-/* ─── action (reply OR start) ─────────────── */
+/* ─── action (unchanged) ──────────────────── */
 export async function action({ request }: ActionFunctionArgs) {
     const fd = await request.formData();
     const conversationId = fd.get("conversationId")?.toString() ?? null;
     const phoneRaw = fd.get("phone")?.toString() ?? null;
     const text = (fd.get("text")?.toString() ?? "").trim() || "Hello! 👋";
 
-    /* reply */
     if (conversationId) {
         const convo = await db.conversation.findUnique({ where: { id: conversationId } });
         if (!convo) throw new Response("Not found", { status: 404 });
@@ -83,7 +81,6 @@ export async function action({ request }: ActionFunctionArgs) {
         return json({ ok: true, conversationId });
     }
 
-    /* new WA chat */
     if (!phoneRaw) throw new Response("Phone missing", { status: 400 });
     const phone = normalizePhone(phoneRaw);
     let convo = await db.conversation.findUnique({
@@ -92,10 +89,6 @@ export async function action({ request }: ActionFunctionArgs) {
 
     if (!convo) {
         const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID_MAIN!;
-
-        // OPTIONAL FIRST TEMPLATE.  Commented out as requested.
-        // await sendWaTemplate(phoneNumberId, phone);
-
         convo = await db.conversation.create({
             data: {
                 channel: "WA",
@@ -110,42 +103,24 @@ export async function action({ request }: ActionFunctionArgs) {
     return json({ ok: true, conversationId: convo.id });
 }
 
-/* keep the helper but unused for now */
-async function sendWaTemplate(phoneNumberId: string, to: string) {
-    await fetch(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, {
-        method: "POST",
-        headers: {
-            Authorization: `Bearer ${process.env.WHATSAPP_TOKEN!}`,
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-            messaging_product: "whatsapp",
-            to,
-            type: "template",
-            template: { name: "hello_world", language: { code: "en_US" } },
-        }),
-    });
-}
-
 /* ─── component ───────────────────────────── */
 export default function ChatRoute() {
-    const { conversations, messages, selectedId } =
+    const { conversations, messages: initial, selectedId } =
         useLoaderData<typeof loader>();
+
+    const [messages, setMessages] = useState(initial);
 
     const sendFetcher = useFetcher();
     const newChatFetcher = useFetcher<{ conversationId?: string }>();
     const inputRef = useRef<HTMLInputElement | null>(null);
     const paneRef = useRef<HTMLDivElement | null>(null);
-    const revalidator = useRevalidator();
 
-    /* clear box on submit */
     /* clear box on submit */
     useEffect(() => {
         if (sendFetcher.state === "submitting" && inputRef.current) {
-            inputRef.current.value = "";      // ← safe: current is not null here
+            inputRef.current.value = "";
         }
     }, [sendFetcher.state]);
-  
 
     /* optimistic bubble */
     const optimisticText =
@@ -153,21 +128,38 @@ export default function ChatRoute() {
             ? sendFetcher.formData?.get("text")?.toString() ?? ""
             : null;
 
-    /* auto-scroll */
+    /* scroll to bottom whenever messages change */
     useEffect(() => {
         paneRef.current?.scrollTo({ top: paneRef.current.scrollHeight });
     }, [messages.length, optimisticText]);
 
-    /* jump to new chat */
+    /* go to newly-created conversation */
     useEffect(() => {
         if (
             newChatFetcher.state === "idle" &&
             newChatFetcher.data?.conversationId
         ) {
-            revalidator.revalidate();
             window.location.search = `?id=${newChatFetcher.data.conversationId}`;
         }
-    }, [newChatFetcher.state, newChatFetcher.data, revalidator]);
+    }, [newChatFetcher.state, newChatFetcher.data]);
+
+    /* WebSocket hookup */
+    useEffect(() => {
+        if (!selectedId) return;
+
+        const ws = new WebSocket(LISTENER_WS);
+
+        ws.onmessage = (e) => {
+            try {
+                const msg = JSON.parse(e.data);
+                if (msg.convId === selectedId) {
+                    setMessages((prev: any) => [...prev, msg]);
+                }
+            } catch (_) { }
+        };
+
+        return () => ws.close();
+    }, [selectedId]);
 
     return (
         <div className="chat-grid">
@@ -204,7 +196,7 @@ export default function ChatRoute() {
                         ))}
 
                         {optimisticText && (
-                            <div className="bubble out optimistic">
+                            <div key="optimistic" className="bubble out optimistic">
                                 <div className="bubble-body">{optimisticText}</div>
                                 <span className="ts">{new Date().toLocaleString()}</span>
                             </div>
