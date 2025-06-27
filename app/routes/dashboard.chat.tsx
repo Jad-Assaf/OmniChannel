@@ -1,3 +1,4 @@
+/* app/routes/dashboard.chat.tsx */
 import {
     json,
     type LoaderFunctionArgs,
@@ -15,7 +16,7 @@ import "../styles/chat.css";
 
 const LISTENER_WS = "wss://renderomnilistener.onrender.com";
 
-/* helper */
+/* util: normalise Lebanese phone numbers */
 const normalizePhone = (raw: string) => {
     let n = raw.trim();
     if (n.startsWith("+")) n = n.slice(1);
@@ -24,19 +25,22 @@ const normalizePhone = (raw: string) => {
     return n;
 };
 
-/* ─── loader ─────────────────────────────────────────────── */
+/* ──────────────────────────  LOADER  ────────────────────────── */
 export async function loader({ request }: LoaderFunctionArgs) {
     const url = new URL(request.url);
     const selectedId = url.searchParams.get("id") ?? undefined;
 
-    /* conversations + unread count */
-    const raw = await db.conversation.findMany({
-        orderBy: { updatedAt: "desc" },
-        take: 40,
-    });
+    /* build conversation list with unread counts + latest-message time */
+    const rawConvos = await db.conversation.findMany();
 
     const conversations = await Promise.all(
-        raw.map(async (c: { id: any; lastReadAt: any; channel: any; externalId: any; customerName: any; updatedAt: any; }) => {
+        rawConvos.map(async (c: any) => {
+            const lastMsg = await db.message.findFirst({
+                where: { conversationId: c.id },
+                orderBy: { timestamp: "desc" },
+                select: { timestamp: true },
+            });
+
             const unread = await db.message.count({
                 where: {
                     conversationId: c.id,
@@ -50,10 +54,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
                 channel: c.channel,
                 externalId: c.externalId,
                 customerName: c.customerName,
-                updatedAt: c.updatedAt,
-                unread, // exact number
+                lastMsgAt: lastMsg?.timestamp ?? new Date(0),
+                unread,
             };
         })
+    );
+
+    conversations.sort(
+        (a, b) => b.lastMsgAt.getTime() - a.lastMsgAt.getTime()
     );
 
     const messages = selectedId
@@ -66,13 +74,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
     return json({ conversations, messages, selectedId });
 }
 
-/* ─── action (unchanged except pg_notify) ────────────────── */
+/* ──────────────────────────  ACTION  ────────────────────────── */
 export async function action({ request }: ActionFunctionArgs) {
     const fd = await request.formData();
     const conversationId = fd.get("conversationId")?.toString() ?? null;
     const phoneRaw = fd.get("phone")?.toString() ?? null;
     const text = (fd.get("text")?.toString() ?? "").trim() || "Hello! 👋";
 
+    /* reply to existing conversation */
     if (conversationId) {
         const convo = await db.conversation.findUnique({ where: { id: conversationId } });
         if (!convo) throw new Response("Not found", { status: 404 });
@@ -112,7 +121,7 @@ export async function action({ request }: ActionFunctionArgs) {
         return json({ ok: true, conversationId });
     }
 
-    /* start new WA chat */
+    /* start brand-new WhatsApp thread */
     if (!phoneRaw) throw new Response("Phone missing", { status: 400 });
     const phone = normalizePhone(phoneRaw);
 
@@ -136,13 +145,20 @@ export async function action({ request }: ActionFunctionArgs) {
     return json({ ok: true, conversationId: convo.id });
 }
 
-/* ─── React component ────────────────────────────────────── */
+/* ─────────────────────────  COMPONENT  ───────────────────────── */
 export default function ChatRoute() {
-    const { conversations, messages: initial, selectedId } =
+    const { conversations: initialThreads, messages: initialMsgs, selectedId } =
         useLoaderData<typeof loader>();
 
-    const [messages, setMessages] = useState(initial);
-    useEffect(() => setMessages(initial), [initial, selectedId]);
+    /* thread + message state (keeps unread badge live) */
+    const [threads, setThreads] = useState(initialThreads);
+    const [messages, setMessages] = useState(initialMsgs);
+
+    /* refresh state when loader re-runs */
+    useEffect(() => {
+        setThreads(initialThreads);
+        setMessages(initialMsgs);
+    }, [initialThreads, initialMsgs]);
 
     const sendFetcher = useFetcher();
     const newChatFetch = useFetcher<{ conversationId?: string }>();
@@ -151,34 +167,39 @@ export default function ChatRoute() {
     const inputRef = useRef<HTMLInputElement | null>(null);
     const paneRef = useRef<HTMLDivElement | null>(null);
 
-    /* mark read */
+    /* mark current convo as read + clear badge */
     useEffect(() => {
         if (selectedId) {
             readFetcher.submit(
                 { conversationId: selectedId },
                 { method: "post", action: "/dashboard/chat/read" }
             );
+            setThreads((prev) =>
+                prev.map((t) =>
+                    t.id === selectedId ? { ...t, unread: 0 } : t
+                )
+            );
         }
     }, [selectedId]);
 
     /* clear composer */
     useEffect(() => {
-        if (sendFetcher.state === "submitting" && inputRef.current) {
+        if (sendFetcher.state === "submitting" && inputRef.current)
             inputRef.current.value = "";
-        }
     }, [sendFetcher.state]);
 
+    /* optimistic bubble text */
     const optimisticText =
         sendFetcher.state === "submitting"
             ? sendFetcher.formData?.get("text")?.toString() ?? ""
             : null;
 
-    /* scroll */
+    /* auto-scroll */
     useEffect(() => {
         paneRef.current?.scrollTo({ top: paneRef.current.scrollHeight });
     }, [messages.length, optimisticText]);
 
-    /* redirect on new chat */
+    /* redirect after starting new chat */
     useEffect(() => {
         if (
             newChatFetch.state === "idle" &&
@@ -188,21 +209,52 @@ export default function ChatRoute() {
         }
     }, [newChatFetch.state, newChatFetch.data]);
 
-    /* live WS */
+    /* WebSocket live updates */
     useEffect(() => {
-        if (!selectedId) return;
         const ws = new WebSocket(LISTENER_WS);
+
         ws.onmessage = (e) => {
             try {
-                const m = JSON.parse(e.data);
-                if (m.convId === selectedId) setMessages((p) => [...p, m]);
+                const msg = JSON.parse(e.data);
+                /* update open pane */
+                if (msg.convId === selectedId) {
+                    setMessages((prev) => [...prev, msg]);
+                } else {
+                    /* bump badge + move thread up */
+                    setThreads((prev) => {
+                        const next = prev.map((t) =>
+                            t.id === msg.convId
+                                ? {
+                                    ...t,
+                                    unread: t.unread + 1,
+                                    lastMsgAt: new Date(msg.timestamp),
+                                }
+                                : t
+                        );
+                        next.sort(
+                            (a, b) => b.lastMsgAt.getTime() - a.lastMsgAt.getTime()
+                        );
+                        return next;
+                    });
+                }
             } catch { }
         };
+
         return () => ws.close();
     }, [selectedId]);
 
+    /* optimistic text helper */
+    const optimisticBubble =
+        optimisticText && (
+            <div key="optimistic" className="bubble out optimistic">
+                <div className="bubble-body">{optimisticText}</div>
+                <span className="ts">{new Date().toLocaleString()}</span>
+            </div>
+        );
+
     return (
         <div className="chat-grid">
+            {/* ───── Sidebar ───── */}
             <aside className="sidebar">
                 <newChatFetch.Form method="post" className="new-chat-bar">
                     <input name="phone" placeholder="70123456 or +4479…" required />
@@ -211,16 +263,18 @@ export default function ChatRoute() {
 
                 <header className="sidebar-header">Conversations</header>
                 <ul className="conversation-list">
-                    {conversations.map((c) => (
+                    {threads.map((t) => (
                         <li
-                            key={c.id}
-                            className={c.id === selectedId ? "conversation active" : "conversation"}
+                            key={t.id}
+                            className={t.id === selectedId ? "conversation active" : "conversation"}
                         >
-                            <Link to={`?id=${c.id}`}>
-                                <span className={`badge ${c.channel.toLowerCase()}`}>{c.channel}</span>
-                                {c.customerName ?? c.externalId}
-                                {c.unread > 0 && (
-                                    <span className="unread-badge">{c.unread}</span>
+                            <Link to={`?id=${t.id}`}>
+                                <span className={`badge ${t.channel.toLowerCase()}`}>
+                                    {t.channel}
+                                </span>
+                                {t.customerName ?? t.externalId}
+                                {t.unread > 0 && (
+                                    <span className="unread-badge">{t.unread}</span>
                                 )}
                             </Link>
                         </li>
@@ -228,6 +282,7 @@ export default function ChatRoute() {
                 </ul>
             </aside>
 
+            {/* ───── Messages Pane ───── */}
             {selectedId ? (
                 <section className="messages-pane">
                     <div className="messages-scroll" ref={paneRef}>
@@ -239,18 +294,17 @@ export default function ChatRoute() {
                                 </span>
                             </div>
                         ))}
-
-                        {optimisticText && (
-                            <div key="optimistic" className="bubble out optimistic">
-                                <div className="bubble-body">{optimisticText}</div>
-                                <span className="ts">{new Date().toLocaleString()}</span>
-                            </div>
-                        )}
+                        {optimisticBubble}
                     </div>
 
                     <sendFetcher.Form method="post" className="composer">
                         <input type="hidden" name="conversationId" value={selectedId} />
-                        <input ref={inputRef} name="text" placeholder="Reply…" autoComplete="off" />
+                        <input
+                            ref={inputRef}
+                            name="text"
+                            placeholder="Reply…"
+                            autoComplete="off"
+                        />
                         <button disabled={sendFetcher.state !== "idle"}>Send</button>
                     </sendFetcher.Form>
                 </section>
