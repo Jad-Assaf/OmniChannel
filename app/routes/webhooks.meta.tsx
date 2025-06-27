@@ -5,7 +5,7 @@ import {
     json,
 } from "@remix-run/node";
 import { EventEmitter } from "events";
-import { Client } from "pg";                 // ← node-postgres client
+import { Client } from "pg";
 import { db } from "~/utils/db.server";
 
 /* your verify token from Meta */
