@@ -1,50 +1,37 @@
 /* app/routes/webhooks.meta.ts */
+
 import {
+    json,
     type LoaderFunction,
     type ActionFunction,
-    json,
 } from "@remix-run/node";
-import { EventEmitter } from "events";
-import { Client } from "pg";
 import { db } from "~/utils/db.server";
 
-/* your verify token from Meta */
+/* Meta verify token */
 const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN!;
 
-/* ──────────────────────────────────────────────────── */
-/* 1. global EventEmitter + single pg LISTEN client    */
-/*    (shared across warm invocations on Vercel)       */
-/* ──────────────────────────────────────────────────── */
-function liveBus() {
-    if (!(global as any).__bus) {
-        const bus = new EventEmitter();
-        bus.setMaxListeners(0);
+/* ───── Postgres helper: one lazy global client ───── */
+let pgClient: any;
 
-        const pg = new Client({ connectionString: process.env.DATABASE_URL });
-        pg.connect().then(() => {
-            pg.query("LISTEN new_msg");
-            pg.on("notification", (msg) => {
-                bus.emit("new", { conversationId: msg.payload });
-            });
-        });
-
-        (global as any).__bus = bus;
+async function pg() {
+    if (!pgClient) {
+        /* dynamic import keeps pg & node built-ins out of the browser bundle */
+        const { Client } = await import("pg");
+        pgClient = new Client({ connectionString: process.env.DATABASE_URL });
+        await pgClient.connect();
+        /* nothing to LISTEN here — dashboard does that; webhook only NOTIFY */
     }
-    return (global as any).__bus as EventEmitter;
+    return pgClient;
 }
 
-/* helper → emit to Postgres so *all* lambdas see it */
 async function notify(conversationId: string) {
-    /* reuse the same connection the bus opened */
-    const pg = new Client({ connectionString: process.env.DATABASE_URL });
-    await pg.connect();
-    await pg.query("NOTIFY new_msg, $1::text", [conversationId]);   // publish
-    await pg.end();
+    const client = await pg();
+    await client.query("NOTIFY new_msg, $1::text", [conversationId]);
 }
 
-/* ──────────────────────────────────────────────────── */
-/* 2. GET /webhooks/meta  → verification handshake     */
-/* ──────────────────────────────────────────────────── */
+/* ─────────────────────────────────────────── */
+/* 1. GET /webhooks/meta → verification        */
+/* ─────────────────────────────────────────── */
 export const loader: LoaderFunction = async ({ request }) => {
     const u = new URL(request.url);
     if (
@@ -56,15 +43,15 @@ export const loader: LoaderFunction = async ({ request }) => {
     return new Response("Forbidden", { status: 403 });
 };
 
-/* ──────────────────────────────────────────────────── */
-/* 3. POST /webhooks/meta  → WA + FB messages          */
-/* ──────────────────────────────────────────────────── */
+/* ─────────────────────────────────────────── */
+/* 2. POST /webhooks/meta → WA & FB messages   */
+/* ─────────────────────────────────────────── */
 export const action: ActionFunction = async ({ request }) => {
     const payload = await request.json();
 
     for (const entry of payload.entry ?? []) {
         switch (payload.object) {
-            /* ───────── WhatsApp ───────── */
+            /* ───── WhatsApp Cloud API ───── */
             case "whatsapp_business_account": {
                 for (const change of entry.changes ?? []) {
                     const { messages = [], metadata } = change.value ?? {};
@@ -91,13 +78,13 @@ export const action: ActionFunction = async ({ request }) => {
                             data: { conversationId: convo.id, direction: "in", text, timestamp: ts },
                         });
 
-                        await notify(convo.id);   // realtime push
+                        await notify(convo.id);          // ← realtime push
                     }
                 }
                 break;
             }
 
-            /* ───────── Messenger ───────── */
+            /* ───── Messenger / IG DM ───── */
             case "page": {
                 for (const e of entry.messaging ?? []) {
                     const externalId = e.sender?.id;
@@ -120,13 +107,14 @@ export const action: ActionFunction = async ({ request }) => {
                         data: { conversationId: convo.id, direction: "in", text, timestamp: ts },
                     });
 
-                    await notify(convo.id);     // realtime push
+                    await notify(convo.id);          // ← realtime push
                 }
                 break;
             }
         }
     }
 
+    /* Meta requires a fast 200 JSON */
     return json({ received: true });
 };
   
