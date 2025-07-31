@@ -71,9 +71,26 @@ export async function loader({ request }: LoaderFunctionArgs) {
     return json({ conversations, messages, selectedId });
 }
 
-/* ——— ACTION (unchanged except pg_notify) ——— */
+/* ——— ACTION (added delete-handling before existing logic) ——— */
 export async function action({ request }: ActionFunctionArgs) {
     const fd = await request.formData();
+
+    // Handle deletion of a conversation
+    const deleteId = fd.get("deleteConversationId")?.toString();
+    if (deleteId) {
+        // delete all messages in the conversation, then the conversation itself
+        await db.message.deleteMany({
+            where: { conversationId: deleteId },
+        });
+        await db.conversation.delete({
+            where: { id: deleteId },
+        });
+        // notify clients if needed
+        await db.$executeRaw`SELECT pg_notify('conversation_deleted', ${deleteId})`;
+        return json({ ok: true, deletedId: deleteId });
+    }
+
+    // Existing send-message or start-new-convo logic
     const conversationId = fd.get("conversationId")?.toString() ?? null;
     const phoneRaw = fd.get("phone")?.toString() ?? null;
     const text = (fd.get("text")?.toString() ?? "").trim() || "Hello! 👋";
@@ -104,15 +121,15 @@ export async function action({ request }: ActionFunctionArgs) {
         });
 
         await db.$executeRaw`SELECT pg_notify(
-        'new_message',
-        ${JSON.stringify({
+          'new_message',
+          ${JSON.stringify({
             id: saved.id,
             convId: conversationId,
             direction: "out",
             text,
             timestamp: saved.timestamp.getTime(),
         })}
-      )`;
+        )`;
 
         return json({ ok: true, conversationId });
     }
@@ -158,6 +175,7 @@ export default function ChatRoute() {
     const sendFetcher = useFetcher();
     const newChatFetch = useFetcher<{ conversationId?: string }>();
     const readFetcher = useFetcher();
+    const deleteFetcher = useFetcher();
 
     const inputRef = useRef<HTMLInputElement | null>(null);
     const paneRef = useRef<HTMLDivElement | null>(null);
@@ -211,6 +229,18 @@ export default function ChatRoute() {
             try {
                 const m = JSON.parse(e.data);
 
+                if (m.type === "conversation_deleted") {
+                    // if the current conversation was deleted, clear selection
+                    if (m.convId === selectedId) {
+                        window.location.search = "";
+                    }
+                    // remove from list
+                    setThreads((prev) =>
+                        prev.filter((t) => t.id !== m.convId)
+                    );
+                    return;
+                }
+
                 if (m.convId === selectedId) {
                     /* update open pane */
                     setMessages((prev) => [...prev, m]);
@@ -262,6 +292,11 @@ export default function ChatRoute() {
                                     <span className="unread-badge">{t.unread}</span>
                                 )}
                             </Link>
+                            {/* Delete button */}
+                            <deleteFetcher.Form method="post" style={{ display: "inline" }}>
+                                <input type="hidden" name="deleteConversationId" value={t.id} />
+                                <button type="submit" title="Delete conversation">&times;</button>
+                            </deleteFetcher.Form>
                         </li>
                     ))}
                 </ul>
@@ -296,4 +331,3 @@ export default function ChatRoute() {
         </div>
     );
 }
-  
