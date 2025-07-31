@@ -1,18 +1,8 @@
-import { ArrowLeft } from "lucide-react";
-import { Link } from "wouter";
-import { Button } from "@/components/ui/button";
-
 export default function PrivacyPolicy() {
   return (
     <div className="min-h-screen bg-surface">
       <div className="max-w-4xl mx-auto px-6 py-8">
         <div className="mb-6">
-          <Link href="/">
-            <Button variant="ghost" className="mb-4">
-              <ArrowLeft className="mr-2 h-4 w-4" />
-              Back to Dashboard
-            </Button>
-          </Link>
           <h1 className="text-3xl font-bold text-primary mb-2">
             Privacy Policy
           </h1>
